@@ -1,0 +1,73 @@
+{
+  "name": "frontend",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "lint": "oxlint",
+    "preview": "vite preview",
+    "pack": "electron-builder --dir",
+    "dist": "electron-builder",
+    "build:all": "npm run build && cd ../backend && python -m PyInstaller --name jarvis-backend --onefile run.py --distpath ../dist && cd ../frontend && npm run dist"
+  },
+  "dependencies": {
+    "@mediapipe/tasks-vision": "^1.0.1",
+    "@react-three/drei": "^10.7.8",
+    "@react-three/fiber": "^9.7.0",
+    "@react-three/postprocessing": "^3.1.1",
+    "auto-launch": "^5.0.6",
+    "framer-motion": "^13.1.1",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8",
+    "three": "^0.185.1"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "^4.3.3",
+    "@types/react": "^19.2.18",
+    "@types/react-dom": "^19.2.4",
+    "@vitejs/plugin-react": "^6.1.0",
+    "autoprefixer": "^10.5.4",
+    "electron": "^44.0.0",
+    "electron-builder": "^26.15.3",
+    "lucide-react": "^1.35.0",
+    "oxlint": "^1.79.0",
+    "postcss": "^8.5.26",
+    "tailwindcss": "^4.3.3",
+    "vite": "^8.2.2",
+    "vite-plugin-electron": "^1.1.1",
+    "vite-plugin-electron-renderer": "^1.0.0"
+  },
+  "main": "dist-electron/main.js",
+  "build": {
+    "appId": "com.jarvis.dashboard",
+    "productName": "Jarvis Dashboard",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist-electron",
+      "dist",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "../dist/jarvis-backend.exe",
+        "to": "backend/jarvis-backend.exe",
+        "filter": [
+          "**/*"
+        ]
+      }
+    ],
+    "win": {
+      "target": "nsis"
+    },
+    "mac": {
+      "target": "dmg"
+    },
+    "linux": {
+      "target": "AppImage"
+    }
+  }
+}

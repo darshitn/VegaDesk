@@ -1,0 +1,18 @@
+--extra-index-url https://download.pytorch.org/whl/cpu
+fastapi
+uvicorn
+google-genai
+requests
+python-dotenv
+psutil
+GPUtil
+websockets
+sqlalchemy
+faster-whisper
+python-multipart
+openwakeword
+sounddevice
+numpy
+rapidfuzz
+torch
+torchaudio

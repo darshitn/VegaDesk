@@ -1,0 +1,43 @@
+# Dependencies
+node_modules/
+package-lock.json.bak
+
+# Build & Packaging outputs
+dist/
+dist-electron/
+release/
+build/
+*.exe
+*.pkg
+*.pyz
+*.spec.bak
+
+# Python artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+venv/
+.venv/
+env/
+
+# Secrets & Environment configs
+.env
+*.env
+!.env.example
+
+# Local SQLite databases
+jarvis.db
+*.db
+*.sqlite
+*.sqlite3
+
+# Logs
+*.log
+logs/
+
+# Operating System & IDE files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
