@@ -346,7 +346,7 @@ function EmberParticles({ count=280, radius=9 }) {
   )
 }
 
-function Scene({ onSelectModule, pointerCoords, rotationDelta, zoomDelta, resetTrigger }) {
+function Scene({ onSelectModule, pointerCoords, rotationAccRef, zoomAccRef, resetTrigger }) {
   const { camera, raycaster, gl } = useThree()
   const controlsRef = useRef()
   const groupRef = useRef()
@@ -369,20 +369,11 @@ function Scene({ onSelectModule, pointerCoords, rotationDelta, zoomDelta, resetT
     return { basePoints: base, hubPoints: hubs }
   }, [])
 
-  const rotationDeltaRef = useRef(rotationDelta)
-  useEffect(()=>{ rotationDeltaRef.current = rotationDelta },[rotationDelta])
-
   // Single source of truth for camera distance. OrbitControls handles rotation
   // only (enableZoom off — wheel is handled manually); every zoom source
   // (wheel, HUD buttons, gesture pinch) writes desiredDistRef and useFrame
   // smooths the camera toward it along the view axis.
   const desiredDistRef = useRef(20)
-  useEffect(()=>{
-    if(zoomDelta!==0){
-      desiredDistRef.current = THREE.MathUtils.clamp(desiredDistRef.current - zoomDelta*0.045, 6, 38)
-      lastInteractionRef.current = performance.now()
-    }
-  },[zoomDelta])
 
   // Wheel zoom (OrbitControls zoom is disabled to avoid two competing sources)
   useEffect(()=>{
@@ -427,6 +418,47 @@ function Scene({ onSelectModule, pointerCoords, rotationDelta, zoomDelta, resetT
   useFrame(()=>{
     const controls = controlsRef.current
     const now = performance.now()
+
+    // ── Drain gesture rotation accumulator ──
+    // Apply accumulated rotation deltas to OrbitControls spherical angles
+    if (rotationAccRef?.current && controls) {
+      const rx = rotationAccRef.current.x
+      const ry = rotationAccRef.current.y
+      if (Math.abs(rx) > 0.001 || Math.abs(ry) > 0.001) {
+        // Convert pixel-like deltas to radians for orbit
+        const azimuthDelta = -rx * 0.004  // horizontal → azimuthal
+        const polarDelta = -ry * 0.004    // vertical → polar
+
+        // Compute current spherical coords, apply delta, convert back
+        const offset = camera.position.clone().sub(controls.target)
+        const spherical = new THREE.Spherical().setFromVector3(offset)
+        spherical.theta += azimuthDelta
+        spherical.phi += polarDelta
+        // Clamp phi to avoid flipping
+        spherical.phi = THREE.MathUtils.clamp(spherical.phi, 0.1, Math.PI - 0.1)
+        offset.setFromSpherical(spherical)
+        camera.position.copy(controls.target).add(offset)
+        camera.lookAt(controls.target)
+
+        lastInteractionRef.current = now
+        // Drain the accumulator
+        rotationAccRef.current.x = 0
+        rotationAccRef.current.y = 0
+      }
+    }
+
+    // ── Drain gesture zoom accumulator ──
+    if (zoomAccRef?.current !== undefined && typeof zoomAccRef.current === 'number') {
+      const zd = zoomAccRef.current
+      if (Math.abs(zd) > 0.001) {
+        desiredDistRef.current = THREE.MathUtils.clamp(
+          desiredDistRef.current - zd * 0.045, 6, 38
+        )
+        lastInteractionRef.current = now
+        zoomAccRef.current = 0
+      }
+    }
+
     // Smooth the camera toward the desired distance along the view axis
     const target = controls ? controls.target : new THREE.Vector3()
     const cur = camera.position.distanceTo(target)
@@ -503,7 +535,7 @@ function Scene({ onSelectModule, pointerCoords, rotationDelta, zoomDelta, resetT
   )
 }
 
-export default function NeuralCosmos({ onSelectModule, pointerCoords, rotationDelta, zoomDelta, resetTrigger, gesturesActive }) {
+export default function NeuralCosmos({ onSelectModule, pointerCoords, rotationAccRef, zoomAccRef, resetTrigger, gesturesActive }) {
   return (
     <div className="w-full h-full relative bg-[#07030a] overflow-hidden">
       {/* Futuristic grid overlay */}
@@ -519,8 +551,8 @@ export default function NeuralCosmos({ onSelectModule, pointerCoords, rotationDe
         <Scene
           onSelectModule={onSelectModule}
           pointerCoords={pointerCoords}
-          rotationDelta={rotationDelta}
-          zoomDelta={zoomDelta}
+          rotationAccRef={rotationAccRef}
+          zoomAccRef={zoomAccRef}
           resetTrigger={resetTrigger}
         />
       </Canvas>

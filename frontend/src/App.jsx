@@ -37,8 +37,8 @@ export default function App() {
   const [isExpanded, setIsExpanded] = useState(false)
   const [activeModule, setActiveModule] = useState(null)
 
-  const [rotationDelta, setRotationDelta] = useState({ x: 0, y: 0 })
-  const [zoomDelta, setZoomDelta] = useState(0)
+  const rotationAccRef = useRef({ x: 0, y: 0 })
+  const zoomAccRef = useRef(0)
   const [pointerCoords, setPointerCoords] = useState(null)
   const [resetTrigger, setResetTrigger] = useState(0)
   const [cameraFps, setCameraFps] = useState(30)
@@ -108,13 +108,11 @@ export default function App() {
   const showSettingsRef = useRef(showSettings)
   useEffect(() => { showSettingsRef.current = showSettings }, [showSettings])
 
-  // Zoom via NeuralCosmos HUD buttons (and future gesture smooth zoom)
+  // Zoom via NeuralCosmos HUD buttons — push to the shared accumulator
   useEffect(() => {
     const onZoomBtn = (e) => {
       const d = e.detail ?? 0
-      setZoomDelta(d)
-      // reset after a tick so next button press triggers new delta
-      setTimeout(() => setZoomDelta(0), 80)
+      zoomAccRef.current += d
     }
     window.addEventListener('jarvis-zoom', onZoomBtn)
     return () => window.removeEventListener('jarvis-zoom', onZoomBtn)
@@ -514,8 +512,8 @@ export default function App() {
                 <main className="flex-1 relative overflow-hidden bg-[#020205]">
                   <HandGestureController 
                     isActive={cameraEnabled && isVisible && theme === 'neural-cosmos'}
-                    onRotate={(x, y) => setRotationDelta({x, y})}
-                    onZoom={(z) => setZoomDelta(z)}
+                    rotationAccRef={rotationAccRef}
+                    zoomAccRef={zoomAccRef}
                     onPointerMove={(x, y) => setPointerCoords(x === null ? null : {x, y, clicked: false})}
                     onSelect={(x, y) => setPointerCoords({x, y, clicked: true})}
                     onReset={() => setResetTrigger(v => v + 1)}
@@ -563,8 +561,8 @@ export default function App() {
                       <NeuralCosmos 
                         onSelectModule={(id) => setActiveModule(id)}
                         pointerCoords={pointerCoords}
-                        rotationDelta={rotationDelta}
-                        zoomDelta={zoomDelta}
+                        rotationAccRef={rotationAccRef}
+                        zoomAccRef={zoomAccRef}
                         resetTrigger={resetTrigger}
                         gesturesActive={cameraEnabled && cameraFps > 0}
                       />
