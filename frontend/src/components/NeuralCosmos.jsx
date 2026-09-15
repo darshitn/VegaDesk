@@ -207,7 +207,7 @@ function HubNode({ position, data, onClick, isHovered, onPointerOver, onPointerO
       </Text>
       {isHovered && (
         <Text position={[0, -0.9, 0]} fontSize={0.16} color="#ffffff" anchorX="center" opacity={0.7}>
-          PINCH TO SELECT • PINCH+DRAG TO ZOOM
+          PINCH TAP TO SELECT • HOLD+DRAG TO ZOOM
         </Text>
       )}
     </group>
