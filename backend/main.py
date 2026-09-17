@@ -483,10 +483,35 @@ def get_voice_enabled():
     return {"enabled": voice_service.is_enabled()}
 
 
+
 @app.post("/api/voice/enabled")
 def set_voice_enabled(req: VoiceEnabledRequest):
     voice_service.set_voice_enabled(bool(req.enabled))
     return {"enabled": bool(req.enabled), "status": voice_service.is_voice_active()}
+
+
+class VoiceDeviceRequest(BaseModel):
+    name: str = Field(default="", max_length=200)
+
+
+@app.get("/api/voice/devices")
+def get_voice_devices():
+    """Return all available audio input devices on this machine."""
+    devices = voice_service.list_input_devices()
+    # Include which device is currently active
+    current = (getattr(voice_service, "_device_override", "") or "").strip()
+    return {"devices": devices, "current": current}
+
+
+@app.post("/api/voice/device")
+def set_voice_device(req: VoiceDeviceRequest):
+    """Set the microphone to use for wake-word detection at runtime.
+    Clears the override if name is empty (reverts to system default).
+    The audio thread picks up the change on its next reconnect cycle."""
+    name = (req.name or "").strip()
+    voice_service.set_mic_device(name)
+    return {"status": "ok", "device": name or "(system default)"}
+
 
 
 # ==========================================

@@ -34,6 +34,8 @@ export default function App() {
 
   const [cameraEnabled, setCameraEnabled] = useState(() => safeGetItem('jarvisCameraEnabled') === 'true')
   const [wakeWordEnabled, setWakeWordEnabled] = useState(() => safeGetItem('jarvisWakeWordEnabled') !== 'false')
+  const [micDevices, setMicDevices] = useState([])          // available input devices
+  const [selectedMic, setSelectedMic] = useState('')        // currently selected mic name
   const [isExpanded, setIsExpanded] = useState(false)
   const [activeModule, setActiveModule] = useState(null)
 
@@ -295,6 +297,27 @@ export default function App() {
     postVoiceEnabled(next)
   }
 
+  // Fetch input devices from backend when settings panel opens
+  const fetchMicDevices = () => {
+    fetch('http://localhost:8000/api/voice/devices')
+      .then(r => r.json())
+      .then(data => {
+        setMicDevices(data.devices || [])
+        setSelectedMic(data.current || '')
+      })
+      .catch(() => { /* backend offline */ })
+  }
+
+  const handleMicChange = (e) => {
+    const name = e.target.value
+    setSelectedMic(name)
+    fetch('http://localhost:8000/api/voice/device', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name })
+    }).catch(() => { /* backend offline */ })
+  }
+
   // ── Expanded (full-screen) state — native IPC in Electron, Fullscreen API in browser ──
   useEffect(() => {
     if (window.electronAPI) {
@@ -406,6 +429,7 @@ export default function App() {
                     transition={{ duration: 0.15, ease: 'easeInOut' }}
                     className="overflow-hidden border-b border-[var(--border-color)]/30"
                     style={{ backgroundColor: 'rgba(8, 12, 24, 0.98)' }}
+                    onAnimationStart={() => { if (showSettings) fetchMicDevices() }}
                   >
                     <div className="p-4 flex flex-col gap-4">
                       <div className="flex items-center justify-between">
@@ -501,6 +525,25 @@ export default function App() {
                             onChange={(e) => { setCryptoCoins(e.target.value); safeSetItem('jarvisCryptoCoins', e.target.value) }}
                           />
                         </div>
+
+                        {/* Microphone selector */}
+                        {micDevices.length > 0 && (
+                          <div className="flex items-center gap-2">
+                            <label className="text-sm font-semibold" title="Pick which microphone the wake word listener uses. Takes effect immediately — no restart needed.">🎤 Mic:</label>
+                            <select
+                              id="mic-device-select"
+                              className="theme-select text-sm p-1 bg-black/20 border border-current/30 max-w-[200px] truncate"
+                              value={selectedMic}
+                              onChange={handleMicChange}
+                              title={selectedMic || 'System Default'}
+                            >
+                              <option value="">System Default</option>
+                              {micDevices.map(d => (
+                                <option key={d.id} value={d.name}>{d.name}</option>
+                              ))}
+                            </select>
+                          </div>
+                        )}
                       </div>
                     </div>
                   </motion.div>

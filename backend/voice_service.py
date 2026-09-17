@@ -51,6 +51,7 @@ def is_enabled():
 def set_voice_enabled(enabled: bool):
     """Toggle wake-word listening. When disabled, the audio thread closes the
     mic stream and idles; when re-enabled it reopens and recalibrates."""
+    global _voice_active, _voice_error  # fix: without this, assignments below create locals
     if enabled:
         _enabled.set()
         _log("[VOICE] Wake-word listening enabled by user.")
@@ -63,8 +64,8 @@ def set_voice_enabled(enabled: bool):
 
 SAMPLE_RATE = 16000
 CHUNK_SAMPLES = 1280        # 80ms at 16kHz — openWakeWord's expected frame size
-WAKE_THRESHOLD = 0.35       # 0.5 never fired on real mics; near-miss logs showed
-                            # "Hey Jarvis" attempts scoring 0.25+ on quiet mics
+WAKE_THRESHOLD = 0.25       # Lowered from 0.35 — near-miss logs showed real "Hey Jarvis"
+                            # attempts scoring 0.25–0.30 on laptop/quiet mics
 SILENCE_TIMEOUT = 1.0       # seconds of silence after speech before stopping
 MAX_RECORD_SECS = 15        # hard cap on recording duration
 MIC_SILENCE_RMS = 0.001     # below this the input is effectively delivering silence
@@ -85,19 +86,51 @@ _logged_predict_errors: set = set()
 _last_near_miss_log = 0.0
 
 
+# Runtime device override — set via set_mic_device() or JARVIS_MIC_DEVICE env.
+# The audio thread picks this up on the *next* reconnect (stream close/reopen).
+_device_override: str = ""
+
+
+def set_mic_device(name: str):
+    """Set the preferred microphone at runtime (no restart required — takes
+    effect on the next stream reconnect, which is triggered automatically)."""
+    global _device_override
+    _device_override = (name or "").strip()
+    _log(f"[VOICE] Runtime mic device set to: {_device_override!r}")
+
+
+def list_input_devices() -> list:
+    """Return a list of available audio input devices as dicts with id/name."""
+    try:
+        import sounddevice as sd
+        devices = sd.query_devices()
+        return [
+            {"id": i, "name": d["name"]}
+            for i, d in enumerate(devices)
+            if d["max_input_channels"] > 0
+        ]
+    except Exception as e:
+        _log(f"[VOICE] Could not enumerate input devices: {e}")
+        return []
+
+
 def _resolve_input_device():
-    """Pick the capture device: JARVIS_MIC_DEVICE (name substring, from
-    backend/.env or the process env) wins over the OS default input."""
+    """Pick the capture device. Priority: runtime _device_override >
+    JARVIS_MIC_DEVICE env var > OS default input."""
     try:
         import sounddevice as sd
         devices = sd.query_devices()
         default_idx = sd.default.device[0]
-        name_filter = (os.getenv("JARVIS_MIC_DEVICE", "") or "").strip().lower()
+        # Runtime override takes highest priority
+        name_filter = _device_override.lower() if _device_override else ""
+        # Fall back to env var if no runtime override set
+        if not name_filter:
+            name_filter = (os.getenv("JARVIS_MIC_DEVICE", "") or "").strip().lower()
         if name_filter:
             for i, d in enumerate(devices):
                 if d["max_input_channels"] > 0 and name_filter in d["name"].lower():
                     return i, d["name"]
-            _log(f"[VOICE] JARVIS_MIC_DEVICE '{name_filter}' matched no input device; using system default.")
+            _log(f"[VOICE] Preferred mic '{name_filter}' matched no input device; using system default.")
         if default_idx is not None and default_idx >= 0:
             return default_idx, devices[default_idx]["name"]
         return None, "system default"
@@ -275,7 +308,7 @@ def _audio_thread():
                 # silent for the first few seconds while the Hands-Free profile
                 # engages, and would otherwise false-alarm.
                 hc_peak = 0.0
-                hc_until = time.time() + 6.0
+                hc_until = time.time() + 2.0  # reduced from 6s → 2s to shrink the OWW warm-up blind window
                 while time.time() < hc_until:
                     try:
                         hc_audio = audio_q.get(timeout=0.5)
