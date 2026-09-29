@@ -16,3 +16,7 @@ numpy
 rapidfuzz
 torch
 torchaudio
+
+# Dev / test
+pytest
+httpx

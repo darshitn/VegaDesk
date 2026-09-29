@@ -8,22 +8,60 @@ import os
 
 # Support both `python -m backend.main` and `python backend/run.py` / PyInstaller
 try:
-    from db import engine, Base, SessionLocal, Task, Note  # when run as `python run.py`
+    from db import engine, Base, SessionLocal, Task, Note, DB_PATH, Timer, Reminder, FocusSession, ScheduledAlert, ActionReceipt, Workspace, SessionNote, Coursework  # when run as `python run.py`
     import voice_service
     import system_actions
+    import migrations
+    import dispatcher
+    import timeutil
+    import tools
+    import ai_radar
+    import model_lane
+    from scheduler import AlertScheduler
+    from radar_scheduler import RadarScheduler
 except ImportError:
-    from .db import engine, Base, SessionLocal, Task, Note
+    from .db import engine, Base, SessionLocal, Task, Note, DB_PATH, Timer, Reminder, FocusSession, ScheduledAlert, ActionReceipt, Workspace, SessionNote, Coursework
     from . import voice_service
     from . import system_actions
+    from . import migrations
+    from . import dispatcher
+    from . import timeutil
+    from . import tools
+    from . import ai_radar
+    from . import model_lane
+    from .scheduler import AlertScheduler
+    from .radar_scheduler import RadarScheduler
 
-Base.metadata.create_all(bind=engine)
+# Non-destructive versioned migrations (backs up the DB file before first ALTER;
+# create_all alone would never add columns to the existing tasks table).
+MIGRATION_INFO = migrations.run_migrations(engine, Base, DB_PATH)
+if MIGRATION_INFO.get("backup_path"):
+    print(f"[MIGRATION] Backed up existing DB to {MIGRATION_INFO['backup_path']}", flush=True)
+print(f"[MIGRATION] Schema version {MIGRATION_INFO['version_before']} -> {MIGRATION_INFO['version_after']} "
+      f"steps={MIGRATION_INFO['steps'] or 'none'}", flush=True)
+
+# Single scheduler owner: one asyncio task in this app process. At-most-once
+# delivery is guaranteed by atomic DB claims even if processes overlap.
+SYSTEM_CLOCK = timeutil.SystemClock()
+alert_scheduler = AlertScheduler(SessionLocal, clock=SYSTEM_CLOCK)
+radar_scheduler = RadarScheduler(SessionLocal, clock=SYSTEM_CLOCK)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     loop = asyncio.get_running_loop()
-    voice_service.start(loop)
+    scheduler_task = loop.create_task(alert_scheduler.run())
+    # VEGA_DISABLE_VOICE=1 keeps the mic/whisper threads off (tests, headless runs).
+    if os.getenv("VEGA_DISABLE_VOICE", "").strip() not in ("1", "true", "yes"):
+        voice_service.start(loop)
+    # VEGA_DISABLE_RADAR=1 keeps the daily AI Radar network job off (tests).
+    radar_task = None
+    if os.getenv("VEGA_DISABLE_RADAR", "").strip() not in ("1", "true", "yes"):
+        radar_task = loop.create_task(radar_scheduler.run())
     yield
+    scheduler_task.cancel()
+    if radar_task:
+        radar_task.cancel()
     # Graceful shutdown: voice thread is daemon, will exit with process
 
 
@@ -68,15 +106,16 @@ from dotenv import load_dotenv
 from pydantic import BaseModel, Field
 from typing import List, Optional
 from urllib.parse import quote
-from google import genai
-from google.genai import types
 
 # Load .env explicitly from the backend directory
 dotenv_path = os.path.join(os.path.dirname(__file__), '.env')
 load_dotenv(dotenv_path)
 
+# Configured provider (env). A per-request `provider` field may override it;
+# there is NO automatic fallback between providers — a failure on the
+# configured provider is reported honestly instead of silently routing
+# private data to another service.
 LLM_PROVIDER = os.getenv("LLM_PROVIDER", "gemini").lower()
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 
 
 class Message(BaseModel):
@@ -89,237 +128,64 @@ class ChatRequest(BaseModel):
     history: List[Message] = Field(default_factory=list, max_length=100)
     userName: Optional[str] = Field(default=None, max_length=50)
     provider: Optional[str] = None
+    idempotencyKey: Optional[str] = Field(default=None, max_length=120)
+    # "chat" (typed) or "voice" (wake-word transcript) — recorded on receipts so
+    # voice-initiated actions are auditable. Anything else falls back to "chat".
+    source: Optional[str] = Field(default="chat", max_length=10)
 
 
-def _get_genai_client():
-    if not GEMINI_API_KEY:
-        raise HTTPException(status_code=500, detail="GEMINI_API_KEY not configured. Set it in backend/.env or switch provider to 'ollama'.")
-    return genai.Client(api_key=GEMINI_API_KEY)
-
-
-def _chat_action_response(message: str) -> dict:
-    """Chat response for an action attempt. open_app/open_website signal
-    success by the 'Opening ...' prefix; the renderer uses `opened` to hide
-    the dashboard so the launched app/website appears on top of it."""
-    return {"response": message, "opened": isinstance(message, str) and message.startswith("Opening ")}
-
-
-def _try_parse_tool_json(content: str):
-    """Weak local models sometimes echo the raw tool-call spec as chat text
-    (e.g. {"type":"function","function":{...},"function_input":{...}}). If the
-    content parses as one of OUR tools, return (name, args) so it can be
-    executed instead of being shown to the user and read aloud."""
-    s = (content or "").strip()
-    if not (s.startswith("{") and s.endswith("}")):
-        return None
-    if '"function"' not in s and '"open_app"' not in s and '"open_website"' not in s:
-        return None
-    try:
-        obj = json.loads(s)
-    except Exception:
-        return None
-    if not isinstance(obj, dict):
-        return None
-    fn = obj.get("function") if isinstance(obj.get("function"), dict) else obj
-    name = fn.get("name") or (obj.get("function_input") or {}).get("name")
-    args = obj.get("arguments") or obj.get("function_input") or fn.get("parameters") or {}
-    if isinstance(args, str):
-        try:
-            args = json.loads(args)
-        except Exception:
-            args = {}
-    if name in ("open_app", "open_website") and isinstance(args, dict):
-        clean_args = {k: v for k, v in args.items() if isinstance(v, (str, int, float))}
-        required = "name" if name == "open_app" else "site_or_url"
-        if str(clean_args.get(required, "")).strip():
-            return name, clean_args
-    return None
-
-
-def _sanitize_content(text: str) -> str:
-    """Final guard: never show raw JSON blobs to the user (or let TTS read them)."""
-    t = (text or "").strip()
-    if t.startswith("{") and (t.endswith("}") or '"function"' in t[:200]):
-        return "I couldn't complete that request. Please try rephrasing it."
-    return t
+def _chat_response(out: dict) -> dict:
+    """Normalize a chat result for the renderer. `opened` keeps the existing
+    contract: open_app/open_website signal success with the 'Opening ...'
+    prefix and the renderer hides the dashboard so the launched window shows."""
+    resp = dict(out)
+    msg = resp.get("response")
+    resp["opened"] = isinstance(msg, str) and msg.startswith("Opening ")
+    return resp
 
 
 @app.post("/chat")
-def chat_endpoint(req: ChatRequest):
-    # 1. Fast Path Check — bypass LLM for obvious open/launch intents
-    is_fast, action_resp = system_actions.check_fast_path(req.message)
+def chat_endpoint(req: ChatRequest, db: Session = Depends(get_db)):
+    # 0. Deterministic assistant commands — tasks/timers/reminders/focus work
+    #    offline (no Ollama/Gemini, zero provider calls) and typed + wake-word
+    #    input share this path. Exact commands are answered immediately and are
+    #    never affected by model availability.
+    src = req.source if req.source in ("chat", "voice") else "chat"
+    result = dispatcher.dispatch_command(
+        db, SYSTEM_CLOCK, req.message, source=src,
+        idempotency_key=req.idempotencyKey)
+    if result.get("handled"):
+        return _chat_response({
+            "response": result["response"],
+            "receipt": result.get("receipt"),
+            "clarification": result.get("clarification", False),
+            "executionMode": "deterministic",
+        })
+
+    # 1. Fast Path Check — bypass the model for obvious open/launch intents
+    is_fast, action_resp, *extra = system_actions.check_fast_path(
+        req.message, db=db, clock=SYSTEM_CLOCK, source=src,
+        idempotency_key=req.idempotencyKey)
     if is_fast:
-        return _chat_action_response(action_resp)
+        receipt = extra[0] if extra else None
+        return _chat_response({
+            "response": action_resp,
+            "receipt": receipt,
+            "executionMode": "deterministic"
+        })
 
-    # 2. LLM Fallback
+    # 2. Model lane — shared intelligence boundary (P1): provider gateway ->
+    #    bounded context -> registry-validated proposal -> the SAME executor
+    #    and receipts the deterministic path uses. One action per request.
     user_name = req.userName.strip() if req.userName and req.userName.strip() else "Sir"
-    system_prompt = (
-        f"You are V.E.G.A., a highly advanced AI assistant. Be concise, dry-witted, helpful, "
-        f"and address the user as {user_name}. For ANY request that means 'access/open/launch/show me/pull up X', "
-        f"you MUST use the provided open_app or open_website tools. Do not attempt to answer conversationally for these requests. "
-        f"Never print tool definitions or JSON — call the tool instead."
+    out = model_lane.run_model_turn(
+        SessionLocal, SYSTEM_CLOCK, req.message, req.history,
+        user_name=user_name,
+        provider_name=(req.provider.lower() if req.provider else LLM_PROVIDER),
+        source=src,
+        idempotency_key=req.idempotencyKey,
     )
-
-    active_provider = req.provider.lower() if req.provider else LLM_PROVIDER
-
-    if active_provider == "ollama":
-        messages = [{"role": "system", "content": system_prompt}]
-        for msg in req.history[-20:]:  # cap history to last 20 to avoid token blow-up
-            role = "assistant" if msg.role == "assistant" else "user"
-            messages.append({"role": role, "content": msg.content})
-        messages.append({"role": "user", "content": req.message})
-
-        ollama_base_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434").rstrip("/")
-        ollama_model = os.getenv("OLLAMA_MODEL", "llama3")
-
-        tools = [
-            {
-                "type": "function",
-                "function": {
-                    "name": "open_app",
-                    "description": "Opens a local application by name",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "name": {"type": "string", "description": "Name of the application (e.g., 'calculator')"}
-                        },
-                        "required": ["name"]
-                    }
-                }
-            },
-            {
-                "type": "function",
-                "function": {
-                    "name": "open_website",
-                    "description": "Opens a website by name or URL",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "site_or_url": {"type": "string", "description": "Name of the site or a URL"}
-                        },
-                        "required": ["site_or_url"]
-                    }
-                }
-            }
-        ]
-
-        try:
-            resp = requests.post(f"{ollama_base_url}/api/chat", json={
-                "model": ollama_model,
-                "messages": messages,
-                "stream": False,
-                "tools": tools
-            }, timeout=60)
-            resp.raise_for_status()
-            data = resp.json()
-
-            msg_data = data.get("message", {})
-
-            # Handle tool calls if any — support multiple and string-encoded args
-            if msg_data.get("tool_calls"):
-                import json
-                for tool_call in msg_data["tool_calls"]:
-                    func = tool_call.get("function", {})
-                    name = func.get("name")
-                    args = func.get("arguments", {})
-
-                    if isinstance(args, str):
-                        try:
-                            args = json.loads(args)
-                        except json.JSONDecodeError:
-                            args = {}
-
-                    if not isinstance(args, dict):
-                        args = {}
-
-                    if name == "open_app":
-                        return _chat_action_response(system_actions.open_app(**args))
-                    elif name == "open_website":
-                        return _chat_action_response(system_actions.open_website(**args))
-
-            # Weak models sometimes emit the tool call as raw JSON *text* —
-            # detect and execute it instead of displaying it.
-            content = msg_data.get("content", "") or ""
-            parsed = _try_parse_tool_json(content)
-            if parsed:
-                tool_name, tool_args = parsed
-                if tool_name == "open_app":
-                    return _chat_action_response(system_actions.open_app(**tool_args))
-                return _chat_action_response(system_actions.open_website(**tool_args))
-            return {"response": _sanitize_content(content)}
-        except requests.exceptions.ConnectionError:
-            return {"error": "Ollama is not reachable. Is Ollama running? Check OLLAMA_BASE_URL in .env."}
-        except requests.exceptions.Timeout:
-            return {"error": "Ollama request timed out. Try a smaller model or increase timeout."}
-        except Exception as e:
-            return {"error": f"Ollama Error: {str(e)}"}
-
-    elif active_provider == "gemini":
-        try:
-            client = _get_genai_client()
-
-            contents = []
-            for msg in req.history[-20:]:
-                role = "model" if msg.role == "assistant" else "user"
-                contents.append({"role": role, "parts": [{"text": msg.content}]})
-
-            contents.append({"role": "user", "parts": [{"text": req.message}]})
-
-            response = client.models.generate_content(
-                model="gemini-2.5-flash",
-                contents=contents,
-                config=types.GenerateContentConfig(
-                    system_instruction=system_prompt,
-                    tools=[system_actions.open_app, system_actions.open_website]
-                )
-            )
-
-            # Handle function calls — support both dict and string arg formats
-            if response.function_calls:
-                import json
-                fc = response.function_calls[0]
-                raw_args = getattr(fc, 'args', {}) or {}
-                # fc.args may be a string (LLM hallucination) or dict
-                if isinstance(raw_args, str):
-                    try:
-                        args_dict = json.loads(raw_args)
-                    except json.JSONDecodeError:
-                        args_dict = {}
-                elif isinstance(raw_args, dict):
-                    args_dict = dict(raw_args)
-                else:
-                    try:
-                        args_dict = dict(raw_args)
-                    except Exception:
-                        args_dict = {}
-
-                if fc.name == "open_app":
-                    # Validate required arg
-                    if "name" not in args_dict:
-                        return {"response": "I couldn't determine which application you want to open. Please specify the app name."}
-                    return _chat_action_response(system_actions.open_app(**args_dict))
-                elif fc.name == "open_website":
-                    if "site_or_url" not in args_dict:
-                        return {"response": "I couldn't determine which website you want to open. Please specify the site name or URL."}
-                    return _chat_action_response(system_actions.open_website(**args_dict))
-
-            # response.text may be None if blocked by safety filters
-            text = getattr(response, 'text', None)
-            if not text:
-                # Try to extract from candidates
-                try:
-                    text = response.candidates[0].content.parts[0].text
-                except Exception:
-                    text = "I couldn't generate a response (possibly blocked by safety filters). Please rephrase."
-            return {"response": _sanitize_content(text)}
-        except HTTPException:
-            raise
-        except Exception as e:
-            # Don't leak full stack to frontend, but log it
-            print(f"[CHAT] Gemini error: {e}", file=sys.stderr)
-            return {"error": f"Gemini Error: {str(e)}"}
-    else:
-        return {"error": f"Invalid LLM provider '{active_provider}'. Use 'gemini' or 'ollama'."}
+    return _chat_response(out)
 
 
 import psutil
@@ -386,6 +252,26 @@ async def websocket_voice(websocket: WebSocket):
         pass
     finally:
         voice_service.unregister_client(websocket)
+
+
+@app.websocket("/ws/alerts")
+async def websocket_alerts(websocket: WebSocket):
+    """Alert delivery channel. The renderer keeps this connected while the
+    overlay window is hidden, so timer/reminder/deadline alerts still surface
+    as OS notifications and in-app toasts."""
+    if not await _ws_origin_allowed(websocket):
+        return
+    await websocket.accept()
+    alert_scheduler.subscribe(websocket)
+    try:
+        while True:
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        pass
+    except Exception:
+        pass
+    finally:
+        alert_scheduler.unsubscribe(websocket)
 
 
 @app.websocket("/ws/system-stats")
@@ -476,6 +362,19 @@ async def websocket_system_stats(websocket: WebSocket):
 
 class VoiceEnabledRequest(BaseModel):
     enabled: bool
+
+
+class VoiceDuckRequest(BaseModel):
+    active: bool
+
+
+@app.post("/api/voice/duck")
+def set_voice_duck(req: VoiceDuckRequest):
+    """Frontend calls this while VEGA's own TTS is speaking so the always-on
+    mic ignores wake words and never transcribes VEGA's voice back as a
+    command. Safety-expired server-side if the client never clears it."""
+    voice_service.set_duck(bool(req.active))
+    return {"ducked": voice_service.is_ducked()}
 
 
 @app.get("/api/voice/enabled")
@@ -609,34 +508,77 @@ def get_crypto(coins: str = "bitcoin,ethereum"):
 # PRODUCTIVITY HUB API
 # ==========================================
 
+from datetime import datetime, timedelta, timezone
+
+
+def _parse_iso_utc(value: str):
+    """ISO-8601 string -> naive UTC datetime (storage format)."""
+    dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if dt.tzinfo is None:
+        # Naive input is interpreted as the user's local time.
+        return timeutil.naive_utc(dt.astimezone(timezone.utc))
+    return timeutil.naive_utc(dt)
+
+
 class TaskCreate(BaseModel):
     text: str = Field(..., min_length=1, max_length=500)
+    deadline_utc: Optional[str] = Field(default=None, max_length=64)
+    subject: Optional[str] = Field(default=None, max_length=200)
 
 
 @app.get("/api/tasks")
 def get_tasks(db: Session = Depends(get_db)):
     tasks = db.query(Task).all()
-    return tasks
+    return [t.to_dict() for t in tasks]
 
 
 @app.post("/api/tasks")
 def create_task(task: TaskCreate, db: Session = Depends(get_db)):
-    db_task = Task(text=task.text.strip())
-    db.add(db_task)
-    db.commit()
-    db.refresh(db_task)
-    return db_task
+    deadline = None
+    if task.deadline_utc:
+        try:
+            deadline = _parse_iso_utc(task.deadline_utc)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="deadline_utc must be ISO-8601")
+    result = tools.execute_intent(
+        db, SYSTEM_CLOCK, "create_task",
+        {"text": task.text.strip(), "deadline_utc": deadline, "subject": task.subject},
+        source="ui")
+    if not result.get("success"):
+        raise HTTPException(status_code=400, detail=result.get("message"))
+    db_task = db.query(Task).filter(Task.id == result["entity_id"]).first()
+    return db_task.to_dict()
 
 
 @app.put("/api/tasks/{task_id}")
 def toggle_task(task_id: int, db: Session = Depends(get_db)):
+    # Legacy UI toggle — preserved for compatibility (spec: keep until migrated).
     db_task = db.query(Task).filter(Task.id == task_id).first()
     if not db_task:
         raise HTTPException(status_code=404, detail="Task not found")
     db_task.completed = not db_task.completed
+    db_task.updated_at = SYSTEM_CLOCK.now_utc()
+    if db_task.completed:
+        tools._cancel_alerts(db, "task", db_task.id, kinds=["task_deadline"])
     db.commit()
     db.refresh(db_task)
-    return db_task
+    return db_task.to_dict()
+
+
+class TaskCompleteRequest(BaseModel):
+    completed: bool = True
+
+
+@app.post("/api/tasks/{task_id}/complete")
+def complete_task(task_id: int, req: TaskCompleteRequest, db: Session = Depends(get_db)):
+    """Explicit set-completion endpoint for the assistant tool (idempotent —
+    retries cannot reverse state like the legacy toggle can)."""
+    result = tools.execute_intent(
+        db, SYSTEM_CLOCK, "set_task_completed",
+        {"task_id": task_id, "completed": req.completed}, source="api")
+    if not result.get("success"):
+        raise HTTPException(status_code=404, detail=result.get("message"))
+    return {"receipt": result}
 
 
 @app.delete("/api/tasks/{task_id}")
@@ -644,9 +586,421 @@ def delete_task(task_id: int, db: Session = Depends(get_db)):
     db_task = db.query(Task).filter(Task.id == task_id).first()
     if not db_task:
         raise HTTPException(status_code=404, detail="Task not found")
+    tools._cancel_alerts(db, "task", db_task.id)
     db.delete(db_task)
     db.commit()
     return {"status": "deleted"}
+
+
+# ==========================================
+# ASSISTANT COMMAND API (typed UI path — same dispatcher as /chat)
+# ==========================================
+
+class CommandRequest(BaseModel):
+    message: str = Field(..., min_length=1, max_length=600)
+    idempotency_key: Optional[str] = Field(default=None, max_length=120)
+    source: str = Field(default="typed", max_length=20)
+
+
+@app.post("/api/assistant/command")
+def assistant_command(req: CommandRequest, db: Session = Depends(get_db)):
+    result = dispatcher.dispatch_command(
+        db, SYSTEM_CLOCK, req.message, source=req.source,
+        idempotency_key=req.idempotency_key)
+    if not result.get("handled"):
+        return {"handled": False, "response": None}
+    return result
+
+
+# ==========================================
+# TIMERS / REMINDERS / FOCUS / ALERTS API
+# ==========================================
+
+class TimerCreate(BaseModel):
+    duration_seconds: int = Field(..., ge=1, le=24 * 3600)
+    label: str = Field(default="", max_length=300)
+    idempotency_key: Optional[str] = Field(default=None, max_length=120)
+
+
+def _exec_or_400(result):
+    if result.get("clarification"):
+        raise HTTPException(status_code=409, detail=result.get("message"))
+    if not result.get("success"):
+        raise HTTPException(status_code=400, detail=result.get("message"))
+    return result
+
+
+@app.get("/api/timers")
+def get_timers(status: str = "active", db: Session = Depends(get_db)):
+    q = db.query(Timer)
+    if status != "all":
+        q = q.filter(Timer.status == status)
+    return [t.to_dict() for t in q.order_by(Timer.end_utc).all()]
+
+
+@app.post("/api/timers")
+def create_timer(req: TimerCreate, db: Session = Depends(get_db)):
+    result = _exec_or_400(tools.execute_intent(
+        db, SYSTEM_CLOCK, "start_timer",
+        {"duration_seconds": req.duration_seconds, "label": req.label},
+        source="ui", idempotency_key=req.idempotency_key))
+    timer = db.query(Timer).filter(Timer.id == result["entity_id"]).first()
+    return {"receipt": result, "timer": timer.to_dict()}
+
+
+@app.delete("/api/timers/{timer_id}")
+def cancel_timer(timer_id: int, db: Session = Depends(get_db)):
+    result = tools.execute_intent(db, SYSTEM_CLOCK, "cancel_timer",
+                                  {"timer_id": timer_id}, source="ui")
+    if result.get("clarification"):
+        raise HTTPException(status_code=409, detail=result.get("message"))
+    if not result.get("success"):
+        raise HTTPException(status_code=404, detail=result.get("message"))
+    return {"receipt": result}
+
+
+class ReminderCreate(BaseModel):
+    text: str = Field(..., min_length=1, max_length=500)
+    due_utc: str = Field(..., max_length=64)
+    idempotency_key: Optional[str] = Field(default=None, max_length=120)
+
+
+@app.get("/api/reminders")
+def get_reminders(status: str = "pending", db: Session = Depends(get_db)):
+    q = db.query(Reminder)
+    if status != "all":
+        q = q.filter(Reminder.status == status)
+    return [r.to_dict() for r in q.order_by(Reminder.due_utc).all()]
+
+
+@app.post("/api/reminders")
+def create_reminder(req: ReminderCreate, db: Session = Depends(get_db)):
+    try:
+        due = _parse_iso_utc(req.due_utc)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="due_utc must be ISO-8601")
+    result = tools.execute_intent(
+        db, SYSTEM_CLOCK, "create_reminder",
+        {"text": req.text, "due_utc": due},
+        source="ui", idempotency_key=req.idempotency_key)
+    if result.get("clarification"):
+        raise HTTPException(status_code=409, detail=result.get("message"))
+    if not result.get("success"):
+        raise HTTPException(status_code=400, detail=result.get("message"))
+    reminder = db.query(Reminder).filter(Reminder.id == result["entity_id"]).first()
+    return {"receipt": result, "reminder": reminder.to_dict()}
+
+
+class SnoozeRequest(BaseModel):
+    minutes: int = Field(default=10, ge=1, le=24 * 60)
+
+
+@app.post("/api/reminders/{reminder_id}/snooze")
+def snooze_reminder(reminder_id: int, req: SnoozeRequest, db: Session = Depends(get_db)):
+    result = tools.execute_intent(
+        db, SYSTEM_CLOCK, "snooze_reminder",
+        {"reminder_id": reminder_id, "snooze_seconds": req.minutes * 60}, source="ui")
+    if not result.get("success"):
+        raise HTTPException(status_code=404, detail=result.get("message"))
+    return {"receipt": result}
+
+
+class FocusStartRequest(BaseModel):
+    duration_seconds: int = Field(default=25 * 60, ge=60, le=8 * 3600)
+    objective: str = Field(default="", max_length=300)
+    idempotency_key: Optional[str] = Field(default=None, max_length=120)
+
+
+class FocusEndRequest(BaseModel):
+    note: str = Field(default="", max_length=1000)
+
+
+@app.get("/api/focus")
+def get_focus(db: Session = Depends(get_db)):
+    active = (db.query(FocusSession).filter(FocusSession.status == "active")
+              .order_by(FocusSession.start_utc.desc()).first())
+    recent = (db.query(FocusSession).filter(FocusSession.status != "active")
+              .order_by(FocusSession.id.desc()).limit(5).all())
+    return {"active": active.to_dict() if active else None,
+            "recent": [s.to_dict() for s in recent]}
+
+
+@app.post("/api/focus/start")
+def start_focus(req: FocusStartRequest, db: Session = Depends(get_db)):
+    result = _exec_or_400(tools.execute_intent(
+        db, SYSTEM_CLOCK, "start_focus_session",
+        {"duration_seconds": req.duration_seconds, "objective": req.objective},
+        source="ui", idempotency_key=req.idempotency_key))
+    session = db.query(FocusSession).filter(FocusSession.id == result["entity_id"]).first()
+    return {"receipt": result, "session": session.to_dict()}
+
+
+@app.post("/api/focus/end")
+def end_focus(req: FocusEndRequest, db: Session = Depends(get_db)):
+    result = tools.execute_intent(db, SYSTEM_CLOCK, "end_focus_session",
+                                  {"outcome_note": req.note}, source="ui")
+    if not result.get("success"):
+        raise HTTPException(status_code=409, detail=result.get("message"))
+    return {"receipt": result}
+
+
+@app.get("/api/alerts")
+def get_alerts(status: str = "pending", db: Session = Depends(get_db)):
+    q = db.query(ScheduledAlert)
+    if status != "all":
+        q = q.filter(ScheduledAlert.status == status)
+    return [a.to_dict() for a in q.order_by(ScheduledAlert.due_utc).limit(100).all()]
+
+
+@app.get("/api/receipts")
+def get_receipts(limit: int = 50, db: Session = Depends(get_db)):
+    limit = max(1, min(limit, 200))
+    rows = (db.query(ActionReceipt).order_by(ActionReceipt.id.desc())
+            .limit(limit).all())
+    return [r.to_dict() for r in rows]
+
+
+# How far back the hub re-lists alerts that already fired (see hub_state).
+RECENT_ALERT_WINDOW = timedelta(hours=6)
+
+
+@app.get("/api/hub/state")
+def hub_state(db: Session = Depends(get_db)):
+    """One aggregated payload for the Productivity Hub."""
+    now = SYSTEM_CLOCK.now_utc()
+    open_tasks = (db.query(Task).filter(Task.completed.is_(False))
+                  .order_by(Task.deadline_utc.is_(None), Task.deadline_utc, Task.id)
+                  .limit(20).all())
+    active_timers = (db.query(Timer).filter(Timer.status == "active")
+                     .order_by(Timer.end_utc).all())
+    next_reminder = (db.query(Reminder).filter(Reminder.status == "pending")
+                     .order_by(Reminder.due_utc).first())
+    active_focus = (db.query(FocusSession).filter(FocusSession.status == "active")
+                    .order_by(FocusSession.start_utc.desc()).first())
+    missed = (db.query(ScheduledAlert).filter(ScheduledAlert.status == "missed")
+              .order_by(ScheduledAlert.due_utc.desc()).limit(10).all())
+    # Delivered is not the same as SEEN: with the overlay hidden the renderer
+    # only pushes an invisible in-app toast (measured 2026-09-22), so recently
+    # delivered alerts are listed here for the next time the hub is opened.
+    recent = (db.query(ScheduledAlert)
+              .filter(ScheduledAlert.status == "delivered",
+                      ScheduledAlert.delivered_at >= now - RECENT_ALERT_WINDOW)
+              .order_by(ScheduledAlert.delivered_at.desc()).limit(10).all())
+    return {
+        "now_utc": timeutil.SystemClock().now_utc().isoformat() + "Z",
+        "timezone": timeutil.tz_context_name(),
+        "open_tasks": [t.to_dict() for t in open_tasks],
+        "active_timers": [t.to_dict() for t in active_timers],
+        "next_reminder": next_reminder.to_dict() if next_reminder else None,
+        "active_focus": active_focus.to_dict() if active_focus else None,
+        "missed_alerts": [a.to_dict() for a in missed],
+        "recent_alerts": [a.to_dict() for a in recent],
+    }
+
+
+# ==========================================
+# P2 WORKSPACES / TODAY / SESSION API  (durable "Resume my work")
+# ==========================================
+# These reuse the SAME executor (tools.execute_intent) + ActionReceipt
+# idempotency as typed/voice commands — no second action framework. Reads
+# (list/resume/today/draft) return no receipt; writes are idempotent.
+
+class WorkspaceCreate(BaseModel):
+    name: str = Field(..., min_length=1, max_length=200)
+    type: str = Field(default="personal", max_length=20)
+    goal: Optional[str] = Field(default=None, max_length=500)
+    next_action: Optional[str] = Field(default=None, max_length=500)
+    path: Optional[str] = Field(default=None, max_length=600)
+    idempotency_key: Optional[str] = Field(default=None, max_length=120)
+
+
+class WorkspaceUpdate(BaseModel):
+    goal: Optional[str] = Field(default=None, max_length=500)
+    next_action: Optional[str] = Field(default=None, max_length=500)
+    blocker: Optional[str] = Field(default=None, max_length=500)
+    status: Optional[str] = Field(default=None, max_length=20)
+    path: Optional[str] = Field(default=None, max_length=600)
+    idempotency_key: Optional[str] = Field(default=None, max_length=120)
+
+
+class SessionNoteCreate(BaseModel):
+    outcome: Optional[str] = Field(default=None, max_length=2000)
+    blocker: Optional[str] = Field(default=None, max_length=1000)
+    next_action: Optional[str] = Field(default=None, max_length=1000)
+    workspace_id: Optional[int] = Field(default=None, ge=1)
+    name: Optional[str] = Field(default=None, max_length=200)
+    idempotency_key: Optional[str] = Field(default=None, max_length=120)
+
+
+@app.get("/api/workspaces")
+def list_workspaces(status: str = "all", db: Session = Depends(get_db)):
+    q = db.query(Workspace)
+    if status != "all":
+        q = q.filter(Workspace.status == status)
+    return [w.to_dict() for w in q.order_by(Workspace.updated_utc.desc()).all()]
+
+
+@app.post("/api/workspaces")
+def create_workspace(req: WorkspaceCreate, db: Session = Depends(get_db)):
+    params = {"name": req.name, "type": req.type, "goal": req.goal,
+              "next_action": req.next_action, "path": req.path}
+    result = _exec_or_400(tools.execute_intent(
+        db, SYSTEM_CLOCK, "register_workspace", params, source="ui",
+        idempotency_key=req.idempotency_key))
+    ws = db.get(Workspace, result["entity_id"])
+    return {"receipt": result, "workspace": ws.to_dict() if ws else None}
+
+
+@app.put("/api/workspaces/{workspace_id}")
+def modify_workspace(workspace_id: int, req: WorkspaceUpdate, db: Session = Depends(get_db)):
+    params = {k: v for k, v in {
+        "goal": req.goal, "next_action": req.next_action, "blocker": req.blocker,
+        "status": req.status, "path": req.path}.items() if v is not None}
+    params["workspace_id"] = workspace_id
+    result = _exec_or_400(tools.execute_intent(
+        db, SYSTEM_CLOCK, "update_workspace", params, source="ui",
+        idempotency_key=req.idempotency_key))
+    ws = db.get(Workspace, workspace_id)
+    return {"receipt": result, "workspace": ws.to_dict() if ws else None}
+
+
+@app.post("/api/workspaces/{workspace_id}/resume")
+def resume_one_workspace(workspace_id: int, db: Session = Depends(get_db)):
+    result = tools.execute_intent(
+        db, SYSTEM_CLOCK, "resume_workspace", {"workspace_id": workspace_id}, source="ui")
+    if not result.get("success"):
+        raise HTTPException(status_code=404, detail=result.get("message"))
+    ws = db.get(Workspace, workspace_id)
+    notes = (db.query(SessionNote).filter(SessionNote.workspace_id == workspace_id)
+             .order_by(SessionNote.created_utc.desc()).limit(5).all())
+    tasks = (db.query(Task).filter(Task.workspace_id == workspace_id,
+             Task.completed.is_(False)).order_by(Task.deadline_utc.is_(None),
+             Task.deadline_utc).all())
+    return {"receipt": result, "workspace": ws.to_dict() if ws else None,
+            "session_notes": [n.to_dict() for n in notes],
+            "open_tasks": [t.to_dict() for t in tasks]}
+
+
+@app.get("/api/workspaces/{workspace_id}/notes")
+def workspace_notes(workspace_id: int, db: Session = Depends(get_db)):
+    notes = (db.query(SessionNote).filter(SessionNote.workspace_id == workspace_id)
+             .order_by(SessionNote.created_utc.desc()).all())
+    return [n.to_dict() for n in notes]
+
+
+@app.post("/api/session/notes")
+def create_session_note(req: SessionNoteCreate, db: Session = Depends(get_db)):
+    params = {k: v for k, v in {
+        "outcome": req.outcome, "blocker": req.blocker, "next_action": req.next_action,
+        "workspace_id": req.workspace_id, "name": req.name}.items() if v is not None}
+    result = _exec_or_400(tools.execute_intent(
+        db, SYSTEM_CLOCK, "add_session_note", params, source="ui",
+        idempotency_key=req.idempotency_key))
+    note = db.get(SessionNote, result["entity_id"])
+    return {"receipt": result, "note": note.to_dict() if note else None}
+
+
+@app.get("/api/today")
+def today(db: Session = Depends(get_db)):
+    result = tools.execute_intent(db, SYSTEM_CLOCK, "get_today", {}, source="ui")
+    return {"message": result.get("message"), "items": result.get("items")}
+
+
+@app.get("/api/session/draft")
+def session_draft(db: Session = Depends(get_db)):
+    result = tools.execute_intent(db, SYSTEM_CLOCK, "build_session_draft", {}, source="ui")
+    return {"message": result.get("message"), "draft": result.get("draft")}
+
+
+# ==========================================
+# STAGE 3 API — smallest academic loop (subject / coursework / due / effort)
+# ==========================================
+
+class CourseworkCreate(BaseModel):
+    title: str = Field(..., min_length=1, max_length=300)
+    kind: str = Field(default="assignment", max_length=30)
+    subject: Optional[str] = Field(default=None, max_length=200)   # registered academic project name
+    workspace_id: Optional[int] = Field(default=None, ge=1)         # or the chosen subject id
+    due: Optional[str] = Field(default=None, max_length=120)        # natural phrase; validated
+    effort_text: Optional[str] = Field(default=None, max_length=120)
+    effort_minutes: Optional[int] = Field(default=None, ge=1, le=100000)
+    idempotency_key: Optional[str] = Field(default=None, max_length=120)
+
+
+@app.get("/api/coursework")
+def coursework_list(workspace_id: int = 0, include_done: bool = False,
+                    db: Session = Depends(get_db)):
+    q = db.query(Coursework)
+    if not include_done:
+        q = q.filter(Coursework.completed.is_(False))
+    if workspace_id:
+        q = q.filter(Coursework.workspace_id == workspace_id)
+    rows = q.order_by(Coursework.due_utc.is_(None), Coursework.due_utc).all()
+    return [c.to_dict() for c in rows]
+
+
+@app.post("/api/coursework")
+def coursework_create(req: CourseworkCreate, db: Session = Depends(get_db)):
+    params = {k: v for k, v in {
+        "title": req.title, "kind": req.kind, "subject": req.subject,
+        "workspace_id": req.workspace_id, "due": req.due,
+        "effort_text": req.effort_text, "effort_minutes": req.effort_minutes}.items()
+        if v is not None}
+    result = _exec_or_400(tools.execute_intent(
+        db, SYSTEM_CLOCK, "add_coursework", params, source="ui",
+        idempotency_key=req.idempotency_key))
+    c = db.get(Coursework, result["entity_id"])
+    return {"receipt": result, "coursework": c.to_dict() if c else None}
+
+
+@app.post("/api/coursework/{coursework_id}/complete")
+def coursework_complete(coursework_id: int, db: Session = Depends(get_db)):
+    result = _exec_or_400(tools.execute_intent(
+        db, SYSTEM_CLOCK, "complete_coursework", {"coursework_id": coursework_id},
+        source="ui"))
+    c = db.get(Coursework, coursework_id)
+    return {"receipt": result, "coursework": c.to_dict() if c else None}
+
+
+@app.get("/api/study/suggest")
+def study_suggest(minutes: int = 25, db: Session = Depends(get_db)):
+    minutes = max(5, min(1440, minutes))
+    result = tools.execute_intent(db, SYSTEM_CLOCK, "suggest_study",
+                                  {"minutes": minutes}, source="ui")
+    return {"message": result.get("message"), "items": result.get("items")}
+
+
+# ==========================================
+# AI RADAR API (daily research digest — no paid API required)
+# ==========================================
+
+@app.get("/api/ai-radar")
+def get_ai_radar(db: Session = Depends(get_db)):
+    """Stored radar items + last-run/freshness. Read-only, never hits network."""
+    return ai_radar.get_radar_state(db, SYSTEM_CLOCK)
+
+
+@app.post("/api/ai-radar/refresh")
+def refresh_ai_radar(db: Session = Depends(get_db)):
+    """User-invoked 'Refresh now'. Sync def -> runs in a threadpool worker, so
+    the blocking network pass never stalls the event loop."""
+    result = ai_radar.run_radar(db, SYSTEM_CLOCK, trigger="manual")
+    return {
+        "status": result["status"],
+        "new_items": result["new_items"],
+        "per_source": result["per_source"],
+        "state": ai_radar.get_radar_state(db, SYSTEM_CLOCK),
+    }
+
+
+@app.post("/api/ai-radar/items/{item_id}/read")
+def mark_radar_item_read(item_id: int, db: Session = Depends(get_db)):
+    item = db.query(ai_radar.AIRadarItem).filter(ai_radar.AIRadarItem.id == item_id).first()
+    if not item:
+        raise HTTPException(status_code=404, detail="Item not found")
+    item.is_read = True
+    db.commit()
+    return {"status": "ok", "id": item_id}
 
 
 class NoteUpdate(BaseModel):
@@ -686,20 +1040,12 @@ import shutil
 _whisper_model = None
 
 
-def get_whisper_model():
-    global _whisper_model
-    if _whisper_model is None:
-        from faster_whisper import WhisperModel
-        # Keep in sync with voice_service (WHISPER_MODEL env, default small.en)
-        _whisper_model = WhisperModel(os.getenv("WHISPER_MODEL", "small.en"), device="cpu", compute_type="int8")
-    return _whisper_model
-
-
 @app.post("/api/transcribe")
 async def transcribe_audio(file: UploadFile = File(...)):
     """
-    Receives a webm/ogg audio blob from the frontend MediaRecorder,
-    transcribes it locally using faster-whisper (no network, no API key).
+    Receives an audio blob (webm/ogg/wav) from the frontend MediaRecorder and
+    transcribes it locally with the same guarded faster-whisper pipeline the
+    wake-word path uses (no network, no API key).
     """
     tmp_path = None
     try:
@@ -707,24 +1053,25 @@ async def transcribe_audio(file: UploadFile = File(...)):
         if file.size and file.size > 10 * 1024 * 1024:
             raise HTTPException(status_code=413, detail="Audio file too large (max 10MB)")
 
-        model = get_whisper_model()
-
         suffix = ".webm"
-        if file.filename and file.filename.endswith(".ogg"):
-            suffix = ".ogg"
+        for ext in (".webm", ".ogg", ".wav", ".mp3", ".m4a"):
+            if file.filename and file.filename.lower().endswith(ext):
+                suffix = ext
+                break
 
         with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
             shutil.copyfileobj(file.file, tmp)
             tmp_path = tmp.name
 
-        segments, info = model.transcribe(tmp_path, beam_size=5)
-        transcript = " ".join(segment.text for segment in segments).strip()
+        # Shared pipeline with the wake-word path: one model instance, same
+        # guards (beam/temperature pinned, VAD, hallucination filter).
+        transcript = await asyncio.to_thread(voice_service.transcribe_source, tmp_path)
 
         return {"transcript": transcript}
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Transcription failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Transcription failed: {str(e)[:200]}")
     finally:
         if tmp_path and os.path.exists(tmp_path):
             try:

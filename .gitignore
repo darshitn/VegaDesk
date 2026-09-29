@@ -29,6 +29,7 @@ env/
 # Local SQLite databases
 jarvis.db
 *.db
+*.db.bak-*
 *.sqlite
 *.sqlite3
 

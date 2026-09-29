@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from 'react'
 import { Cloud, Newspaper, Bitcoin, AlertTriangle, TrendingUp, TrendingDown, ExternalLink, Activity } from 'lucide-react'
+import AIRadarPanel from './AIRadarPanel'
 
 export default function LiveFeeds({ city, cryptoCoins }) {
   const [weather, setWeather] = useState(null)
@@ -159,6 +160,9 @@ export default function LiveFeeds({ city, cryptoCoins }) {
             </ul>
           )}
         </div>
+
+        {/* AI Radar (public sources, cached, offline-safe) */}
+        <AIRadarPanel />
 
       </div>
     </div>

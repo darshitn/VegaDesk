@@ -1,6 +1,6 @@
-import { useState, useEffect, useRef, useCallback } from 'react'
+import { useState, useEffect, useRef, useCallback, useReducer } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { Settings, X, Camera, Maximize2, Minimize2 } from 'lucide-react'
+import { Settings, X, Camera, Maximize2, Minimize2, Bell } from 'lucide-react'
 import AIBrain from './components/AIBrain'
 import SystemMonitor from './components/SystemMonitor'
 import LiveFeeds from './components/LiveFeeds'
@@ -8,6 +8,8 @@ import ProductivityHub from './components/ProductivityHub'
 import SetupWizard from './components/SetupWizard'
 import NeuralCosmos from './components/NeuralCosmos'
 import HandGestureController from './components/HandGestureController'
+import useChat from './hooks/useChat'
+import { initialVoiceUI, reduceVoiceEvent } from './lib/voiceState'
 
 
 const safeGetItem = (key, fallback = '') => {
@@ -17,6 +19,15 @@ const safeSetItem = (key, value) => {
   try { localStorage.setItem(key, value) } catch { /* quota / privacy mode */ }
 }
 
+// Human label per scheduled-alert kind (backend sends `kind`).
+const ALERT_KIND_LABEL = {
+  timer_due: 'Timer',
+  reminder_due: 'Reminder',
+  task_deadline: 'Task deadline',
+  focus_end: 'Focus session',
+  ai_radar_digest: 'AI Radar',
+}
+
 export default function App() {
   const [theme, setTheme] = useState('sci-fi-hud')
   const [health, setHealth] = useState('Checking...')
@@ -24,7 +35,10 @@ export default function App() {
   const [setupComplete, setSetupComplete] = useState(() => safeGetItem('jarvisSetupComplete') === 'true')
 
   const [userName, setUserName] = useState(() => safeGetItem('jarvisUserName', ''))
-  const [llmProvider, setLlmProvider] = useState(() => safeGetItem('jarvisLlmProvider', 'gemini'))
+  // null = send no override so the backend's configured LLM_PROVIDER (.env)
+  // governs. Defaulting the UI to 'gemini' here used to silently route every
+  // fresh install to the cloud even when the user configured a local model.
+  const [llmProvider, setLlmProvider] = useState(() => safeGetItem('jarvisLlmProvider', null))
   const [weatherCity, setWeatherCity] = useState(() => safeGetItem('jarvisWeatherCity', 'London'))
   const [cryptoCoins, setCryptoCoins] = useState(() => safeGetItem('jarvisCryptoCoins', 'bitcoin,ethereum'))
 
@@ -48,24 +62,25 @@ export default function App() {
   // ── Voice WebSocket (wake word) — owned here, NOT in AIBrain ──
   // AIBrain unmounts while the dashboard is hidden, so a listener there could
   // never hear "Hey Jarvis" to summon it. From App the socket stays connected
-  // even when hidden: wake → summon, transcript → queued until chat mounts.
-  const [wakeWordActive, setWakeWordActive] = useState(false)
-  const [voiceState, setVoiceState] = useState('idle') // idle | wake | listening | processing
-  const submitTranscriptRef = useRef(null)
-  const pendingTranscriptRef = useRef(null)
+  // even when hidden. Conversation state also lives in App (useChat), so a
+  // transcript that arrives while hidden is processed and remembered.
+  // `voiceUI.micListening` tracks the BACKEND mic state (structured "mic"
+  // events), never mere WebSocket connectivity — so "Voice offline" is honest
+  // when the model failed to load or the user switched the wake word off.
+  const [voiceUI, voiceDispatch] = useReducer(reduceVoiceEvent, initialVoiceUI)
+
+  // Chat engine (messages, send, TTS, persistence) — owned by App so it
+  // survives AIBrain remounts on theme/overlay/settings changes.
+  const chat = useChat({ userName, provider: llmProvider })
+
+  // Stable indirection so the voice WS effect never re-subscribes and never
+  // holds a stale send callback.
+  const sendMessageRef = useRef(chat.sendMessage)
+  useEffect(() => { sendMessageRef.current = chat.sendMessage }, [chat.sendMessage])
 
   const dispatchTranscript = useCallback((text) => {
-    if (submitTranscriptRef.current) submitTranscriptRef.current(text)
-    else pendingTranscriptRef.current = text // chat not mounted yet — flush on register
-  }, [])
-
-  const registerSubmitTranscript = useCallback((fn) => {
-    submitTranscriptRef.current = fn
-    const pending = pendingTranscriptRef.current
-    if (fn && pending) {
-      pendingTranscriptRef.current = null
-      setTimeout(() => { try { fn(pending) } catch { /* chat unmounted again */ } }, 200)
-    }
+    const t = typeof text === 'string' ? text.trim() : ''
+    if (t) sendMessageRef.current(t, { source: 'voice' })
   }, [])
 
   const audioCtxRef = useRef(null)
@@ -129,45 +144,28 @@ export default function App() {
     const connect = () => {
       ws = new WebSocket('ws://localhost:8000/ws/voice')
 
-      ws.onopen = () => setWakeWordActive(true)
-
+      // No "active" claim on open: the backend immediately sends the real mic
+      // state as a "mic" event, which is what drives the indicator.
       ws.onmessage = (event) => {
         try {
           const data = JSON.parse(event.data)
-          switch (data.type) {
-            case 'wake':
-              setVoiceState('wake')
-              if (window.electronAPI) window.electronAPI.showWindow()
-              setIsVisible(true)
-              break
-            case 'listening':
-              setVoiceState('listening')
-              break
-            case 'processing':
-              setVoiceState('processing')
-              break
-            case 'transcript':
-              setVoiceState('idle')
-              if (data.text && data.text.trim()) dispatchTranscript(data.text.trim())
-              break
-            case 'error':
-              setVoiceState('idle')
-              console.error('[VOICE WS] Error:', data.text)
-              break
-            case 'status':
-              console.log('[VOICE WS] Status:', data.text)
-              break
-            default:
-              break
+          if (data.type === 'wake') {
+            if (window.electronAPI) window.electronAPI.showWindow()
+            setIsVisible(true)
           }
+          if (data.type === 'transcript' && data.text && data.text.trim()) {
+            dispatchTranscript(data.text.trim())
+          }
+          // The reducer owns every state transition (idle/wake/listening/
+          // processing, mic truth, terminal notes) — see lib/voiceState.js.
+          voiceDispatch(data)
         } catch (e) {
           console.error('[VOICE WS] Parse error:', e)
         }
       }
 
       ws.onclose = () => {
-        setWakeWordActive(false)
-        setVoiceState('idle')
+        voiceDispatch({ type: 'ws_close' })
         if (!isUnmounted) reconnectTimer = setTimeout(connect, 3000)
       }
 
@@ -184,6 +182,80 @@ export default function App() {
       if (ws) ws.close()
     }
   }, [dispatchTranscript])
+
+  // ── Alert notifications (timer / reminder / task deadline / focus end) ──
+  // Owned here so the /ws/alerts socket stays connected while the overlay is
+  // hidden. The OS notification is the channel that's visible then; the in-app
+  // toast is the on-screen fallback when the dashboard is shown.
+  const [toasts, setToasts] = useState([])
+  const toastIdRef = useRef(0)
+
+  const pushToast = useCallback((toast) => {
+    const id = ++toastIdRef.current
+    setToasts(prev => [...prev, { id, ...toast }].slice(-5))
+    setTimeout(() => setToasts(prev => prev.filter(t => t.id !== id)), 9000)
+  }, [])
+
+  const dismissToast = useCallback((id) => {
+    setToasts(prev => prev.filter(t => t.id !== id))
+  }, [])
+
+  const raiseAlert = useCallback((alert) => {
+    const label = ALERT_KIND_LABEL[alert.kind] || 'Alert'
+    const title = `V.E.G.A. — ${label}`
+    const body = alert.message || 'You have a notification.'
+    try {
+      if (typeof Notification !== 'undefined') {
+        if (Notification.permission === 'granted') {
+          new Notification(title, { body })
+        } else if (Notification.permission !== 'denied') {
+          Notification.requestPermission().then(p => {
+            if (p === 'granted') { try { new Notification(title, { body }) } catch { /* noop */ } }
+          }).catch(() => { /* permission prompt unavailable */ })
+        }
+      }
+    } catch { /* notifications unsupported in this context */ }
+    pushToast({ title, body })
+  }, [pushToast])
+
+  // Alert WebSocket — reconnects forever, survives dashboard hide/show.
+  useEffect(() => {
+    let ws = null
+    let reconnectTimer = null
+    let isUnmounted = false
+
+    const connect = () => {
+      ws = new WebSocket('ws://localhost:8000/ws/alerts')
+      ws.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data)
+          if (data.type === 'alert' && data.alert) raiseAlert(data.alert)
+        } catch (e) {
+          console.error('[ALERT WS] Parse error:', e)
+        }
+      }
+      ws.onclose = () => { if (!isUnmounted) reconnectTimer = setTimeout(connect, 3000) }
+      ws.onerror = () => { try { ws.close() } catch { /* already closing */ } }
+    }
+
+    connect()
+
+    return () => {
+      isUnmounted = true
+      if (reconnectTimer) clearTimeout(reconnectTimer)
+      if (ws) ws.close()
+    }
+  }, [raiseAlert])
+
+  // Ask for notification permission once up front (best effort; re-asked lazily
+  // on the first alert if still undecided) so hidden-overlay alerts can surface.
+  useEffect(() => {
+    try {
+      if (typeof Notification !== 'undefined' && Notification.permission === 'default') {
+        Notification.requestPermission().catch(() => { /* ignore */ })
+      }
+    } catch { /* unsupported */ }
+  }, [])
 
   useEffect(() => {
     const controller = new AbortController()
@@ -259,7 +331,12 @@ export default function App() {
 
   const handleLlmProviderChange = (newProvider) => {
     setLlmProvider(newProvider)
-    safeSetItem('jarvisLlmProvider', newProvider)
+    // Clicking the active engine again clears the override and returns to
+    // whatever backend/.env configures — the ₹0 default must stay reachable.
+    try {
+      if (newProvider) localStorage.setItem('jarvisLlmProvider', newProvider)
+      else localStorage.removeItem('jarvisLlmProvider')
+    } catch { /* quota / privacy mode */ }
   }
 
   const handleToggleSound = () => {
@@ -349,6 +426,22 @@ export default function App() {
     setSetupComplete(true)
   }
 
+  // Both AIBrain instances (Neural Cosmos module view + standard layout) render
+  // the same App-owned conversation, so switching themes never loses messages.
+  const aiBrainProps = {
+    messages: chat.messages,
+    isThinking: chat.isThinking,
+    isMuted: chat.isMuted,
+    isSpeaking: chat.isSpeaking,
+    voiceState: voiceUI.voiceState,
+    wakeWordActive: voiceUI.micListening,
+    voiceNote: voiceUI.statusNote,
+    onSend: (text) => chat.sendMessage(text, { source: 'chat' }),
+    onToggleMute: () => chat.setIsMuted(m => !m),
+    onAppendMessage: chat.appendMessage,
+    onClearHistory: chat.clearHistory,
+  }
+
   return (
     <AnimatePresence onExitComplete={handleExitComplete}>
       {isVisible && (
@@ -367,10 +460,10 @@ export default function App() {
 
           {/* Main Dashboard Shell */}
           {setupComplete && (
-            <div className="jarvis-shell flex-1 flex flex-col h-full overflow-hidden shadow-2xl">
+            <div className="jarvis-shell flex-1 flex flex-col min-h-0 overflow-hidden shadow-2xl">
 
               {/* Header */}
-              <header className="jarvis-header drag-region flex items-center justify-between p-3 select-none z-50 relative">
+              <header className="jarvis-header drag-region flex shrink-0 items-center justify-between p-3 select-none z-50 relative">
                 <div className="flex items-center gap-3">
                   <div className="status-dot"></div>
                   <h1 className="text-xl font-bold tracking-widest m-0">V.E.G.A.</h1>
@@ -465,12 +558,15 @@ export default function App() {
                               <button
                                 key={p}
                                 className={`toggle-btn ${llmProvider === p ? 'active' : ''}`}
-                                onClick={() => handleLlmProviderChange(p)}
+                                onClick={() => handleLlmProviderChange(llmProvider === p ? null : p)}
                               >
                                 {p === 'gemini' ? 'Gemini API' : 'Local Ollama'}
                               </button>
                             ))}
                           </div>
+                          {!llmProvider && (
+                            <span className="text-xs opacity-70">backend default (backend/.env)</span>
+                          )}
                         </div>
 
                         <div className="flex items-center gap-4 border-l border-current/20 pl-4">
@@ -552,7 +648,7 @@ export default function App() {
 
               {/* Main Content */}
               {theme === 'neural-cosmos' ? (
-                <main className="flex-1 relative overflow-hidden bg-[#020205]">
+                <main className="flex-1 min-h-0 relative overflow-hidden bg-[#020205]">
                   <HandGestureController 
                     isActive={cameraEnabled && isVisible && theme === 'neural-cosmos'}
                     rotationAccRef={rotationAccRef}
@@ -583,15 +679,9 @@ export default function App() {
                       >
                         ← Return to Hub
                       </button>
-                      <div className="flex-1 overflow-y-auto custom-scrollbar">
+                      <div className="flex-1 min-h-0 overflow-y-auto custom-scrollbar">
                         {activeModule === 'AIBrain' && (
-                          <AIBrain
-                            userName={userName}
-                            provider={llmProvider}
-                            voiceState={voiceState}
-                            wakeWordActive={wakeWordActive}
-                            registerSubmitTranscript={registerSubmitTranscript}
-                          />
+                          <AIBrain {...aiBrainProps} />
                         )}
                         {activeModule === 'ProductivityHub' && <ProductivityHub />}
                         {activeModule === 'SystemMonitor' && <SystemMonitor />}
@@ -613,18 +703,14 @@ export default function App() {
                   )}
                 </main>
               ) : (
-                <main className="flex-1 p-6 grid grid-cols-1 md:grid-cols-2 gap-6 relative overflow-hidden">
-                  <div className="flex flex-col gap-6 overflow-y-auto pr-2 pb-6 custom-scrollbar">
-                    <AIBrain
-                      userName={userName}
-                      provider={llmProvider}
-                      voiceState={voiceState}
-                      wakeWordActive={wakeWordActive}
-                      registerSubmitTranscript={registerSubmitTranscript}
-                    />
+                <main className="dashboard-layout custom-scrollbar">
+                  <div className="dashboard-column custom-scrollbar" role="region" aria-label="Assistant and productivity" tabIndex={0}>
+                    <div className="dashboard-chat">
+                      <AIBrain {...aiBrainProps} />
+                    </div>
                     <ProductivityHub />
                   </div>
-                  <div className="flex flex-col gap-6 overflow-y-auto pr-2 pb-6 custom-scrollbar">
+                  <div className="dashboard-column custom-scrollbar" role="region" aria-label="System and feeds" tabIndex={0}>
                     <SystemMonitor />
                     <LiveFeeds city={weatherCity} cryptoCoins={cryptoCoins} />
                   </div>
@@ -633,6 +719,36 @@ export default function App() {
 
             </div>
           )}
+
+          {/* Alert toasts — on-screen fallback for /ws/alerts notifications.
+              Rendered above all modules; OS notifications cover the hidden case. */}
+          <div className="fixed bottom-4 right-4 z-[100] flex flex-col gap-2 no-drag" style={{ WebkitAppRegion: 'no-drag' }}>
+            <AnimatePresence>
+              {toasts.map(t => (
+                <motion.div
+                  key={t.id}
+                  initial={{ opacity: 0, x: 40 }}
+                  animate={{ opacity: 1, x: 0 }}
+                  exit={{ opacity: 0, x: 40 }}
+                  transition={{ duration: 0.15 }}
+                  className="flex items-start gap-3 px-4 py-3 rounded border border-[var(--accent)]/40 bg-black/85 backdrop-blur shadow-lg max-w-xs"
+                >
+                  <Bell size={16} className="text-[var(--accent)] mt-0.5 shrink-0" />
+                  <div className="flex-1 min-w-0">
+                    <div className="text-xs font-bold tracking-wider text-[var(--accent)] truncate">{t.title}</div>
+                    <div className="text-sm mt-0.5 break-words">{t.body}</div>
+                  </div>
+                  <button
+                    onClick={() => dismissToast(t.id)}
+                    className="opacity-50 hover:opacity-100 shrink-0"
+                    aria-label="Dismiss notification"
+                  >
+                    <X size={14} />
+                  </button>
+                </motion.div>
+              ))}
+            </AnimatePresence>
+          </div>
         </motion.div>
       )}
     </AnimatePresence>

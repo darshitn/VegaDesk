@@ -1,6 +1,10 @@
-# V.E.G.A. Desktop Dashboard
+# VEGA AgentOS
 
-> A local-first, global-hotkey AI assistant & system monitor built with Electron, React, FastAPI, and local AI models.
+> A local-first Windows personal agent built from the existing Electron, React, FastAPI, and SQLite application.
+
+**Start here for implementation:** [Agent instructions](AGENTS.md) · [Product brief](docs/VEGA_AGENTOS_BRIEF.md) · [Phase 1 plan](docs/PHASE1_PLAN.md) · [Next Antigravity prompt](docs/ANTIGRAVITY_P1C1_APP_LAUNCH.md) · [Implementation log](docs/IMPLEMENTATION_LOG.md). Open this folder as the Antigravity workspace. Old Qoder plans and handoffs are retained in [history](docs/history/2026-qoder/) for reference.
+
+**Development status:** The repository already contains substantial dashboard, productivity, voice, scheduler, and model-routing code. Phase 1 will assess and harden that code rather than replace it. Historical test claims are in the archived handoffs; Antigravity must verify the current source and tests. Real microphone, notification, and packaged installer behavior remains a separate desktop check.
 
 V.E.G.A. is a frameless desktop overlay with a conversational AI brain, productivity tools, and real-time system telemetry. Press `Ctrl+Space` anywhere and the dashboard animates in.
 
@@ -8,6 +12,8 @@ V.E.G.A. is a frameless desktop overlay with a conversational AI brain, producti
 - 🧠 **Dual AI Engine:** Google Gemini (cloud) or a local Ollama model — your choice, per-session.
 - 🎙️ **Local Voice Interaction:** always-on "Hey Jarvis" wake word with on-device transcription via `faster-whisper`. No cloud APIs, no API keys for voice.
 - ⚡ **System Actions:** "open youtube", "open leetcode" (typed or spoken) resolve instantly via a fast pattern path; the LLM tool-calling path handles everything else.
+- ✅ **Offline task answers:** "what are my pending tasks?", "show my tasks", "what's due this week?" read your existing SQLite tasks through the same deterministic dispatcher — no model, no network. LLMs get a read-only `list_my_tasks` tool bound to that same executor, so they report only real open tasks instead of inventing them.
+- 📡 **AI Radar:** a daily background pass (~09:00 local, plus "Refresh now") over public sources — GitHub releases, Hugging Face, OpenRouter's free-model catalog — stored deduplicated in SQLite. New HF repos are flagged as candidates (not confirmed launches), free hosted models are never presented as free token/credit grants, expired or unconfirmed offers say so, and each source failure is isolated so offline runs keep showing the last known items with an honest "last checked" age. The digest renders deterministically without an LLM.
 - 📊 **Real-time Telemetry:** CPU, RAM, disk, network, GPU, and battery over a WebSocket.
 - 📰 **Live Feeds:** weather (Open-Meteo), Hacker News headlines, crypto prices.
 - 🗂️ **Productivity Hub:** local task list + auto-saving scratchpad notes (SQLite).

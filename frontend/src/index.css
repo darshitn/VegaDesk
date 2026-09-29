@@ -82,6 +82,55 @@
     border-bottom: 1px solid var(--border-color);
   }
 
+  /* Panels keep their content height. A bounded column owns scrolling instead
+     of flex-shrinking the Productivity Hub and clipping its task controls. */
+  .dashboard-layout {
+    flex: 1;
+    min-height: 0;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 1.5rem;
+    padding: 1.5rem;
+    overflow-y: auto;
+    scrollbar-gutter: stable;
+  }
+
+  .dashboard-column {
+    display: flex;
+    flex-direction: column;
+    gap: 1.5rem;
+    min-width: 0;
+  }
+
+  .dashboard-column > * {
+    flex-shrink: 0;
+  }
+
+  .dashboard-column:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: -2px;
+  }
+
+  .dashboard-chat {
+    height: clamp(20rem, 48vh, 32rem);
+  }
+
+  @media (min-width: 48rem) {
+    .dashboard-layout {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      grid-template-rows: minmax(0, 1fr);
+      overflow: hidden;
+    }
+
+    .dashboard-column {
+      min-height: 0;
+      overflow-y: auto;
+      padding-right: 0.5rem;
+      padding-bottom: 1.5rem;
+      scrollbar-gutter: stable;
+    }
+  }
+
   .status-dot {
     width: 8px;
     height: 8px;

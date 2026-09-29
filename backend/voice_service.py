@@ -42,6 +42,96 @@ _enabled.set()  # wake-word listening is on by default; UI can turn it off to
                 # release the mic (classic-BT headsets then leave HFP and their
                 # audio playback quality returns to normal)
 
+# Ducking: while VEGA's own text-to-speech is playing, the browser tells us to
+# ignore the mic so the speaker output can never wake the listener or be
+# transcribed back as a user command. A safety expiry re-arms the mic even if
+# the client dies mid-utterance and never sends the "off" signal.
+_duck_active = threading.Event()
+_duck_deadline = 0.0
+DUCK_MAX_SECS = 120.0
+
+
+def set_duck(active: bool, ttl: float = DUCK_MAX_SECS):
+    """Turn mic ducking on/off (called when VEGA starts/stops speaking)."""
+    global _duck_deadline
+    if active:
+        _duck_deadline = time.time() + max(1.0, min(float(ttl), DUCK_MAX_SECS))
+        _duck_active.set()
+        _log("[VOICE] Mic ducked (VEGA is speaking).")
+    else:
+        _duck_active.clear()
+        _duck_deadline = 0.0
+        _log("[VOICE] Mic un-ducked (speech finished).")
+
+
+def is_ducked() -> bool:
+    if not _duck_active.is_set():
+        return False
+    if time.time() >= _duck_deadline:
+        _duck_active.clear()
+        _log("[VOICE] Duck safety-expired; mic re-armed.")
+        return False
+    return True
+
+
+def _set_mic_listening(listening: bool, note: str = ""):
+    """Single funnel for mic on/off state: updates flags AND emits a structured
+    {"type":"mic"} event so the UI indicator reflects reality, not just the
+    WebSocket being open."""
+    global _voice_active, _voice_error
+    _voice_active = bool(listening)
+    _voice_error = "" if listening else note
+    _enqueue({"type": "mic", "listening": bool(listening), "note": note})
+
+
+def wake_fired(prediction_scores: dict, threshold: float) -> bool:
+    """Pure gate: did any wake model's latest score cross the threshold?"""
+    for score in (prediction_scores or {}).values():
+        if len(score) > 0 and float(score[-1]) >= threshold:
+            return True
+    return False
+
+
+def recording_skip_reason(num_samples: int, peak_abs: float):
+    """Pure gate for a captured recording: a reason string to skip
+    transcription, or None when the audio is usable."""
+    if num_samples < SAMPLE_RATE * 0.3:
+        return "Recording too short"
+    if peak_abs < QUIET_RECORD_PEAK:
+        return "No speech captured"
+    return None
+
+
+# Whisper hallucinations on near-silence — short outputs containing one of
+# these are treated as no speech, not commands.
+TRANSCRIBE_HALLUCINATIONS = (
+    "thank you for watching", "thanks for watching", "thank you for listening",
+    "thanks for listening", "subscribe to", "see you next video",
+    "see you in the next video", "stay tuned", "music [music]", "[music]", "♪",
+)
+
+# The one prompt sentence we feed Whisper — when it hears nothing it sometimes
+# "transcribes" this prompt back at us. That echo is NEVER a user command, so
+# it is filtered at any length (live incident 2026-09-22: a prompt echo reached
+# the dispatcher and triggered a cloud LLM round-trip).
+INITIAL_PROMPT = "The user gives a short spoken command or question."
+_PROMPT_ECHO_MARKER = "the user gives a short spoken command"
+
+
+def filter_hallucination(transcript: str) -> str:
+    """Pure filter: returns '' for known silence-hallucination fillers and for
+    echoes of our own initial prompt."""
+    text = (transcript or "").strip()
+    low = text.lower()
+    if _PROMPT_ECHO_MARKER in low:
+        _log(f"[VOICE] Prompt-echo hallucination filtered: {text[:60]!r}")
+        return ""
+    if low and len(low) < 60 and any(h in low for h in TRANSCRIBE_HALLUCINATIONS):
+        _log(f"[VOICE] Hallucination pattern filtered: {text[:60]!r}")
+        return ""
+    return text
+
+
 def is_voice_active():
     return _voice_active if not _voice_error else _voice_error
 
@@ -51,16 +141,14 @@ def is_enabled():
 def set_voice_enabled(enabled: bool):
     """Toggle wake-word listening. When disabled, the audio thread closes the
     mic stream and idles; when re-enabled it reopens and recalibrates."""
-    global _voice_active, _voice_error  # fix: without this, assignments below create locals
     if enabled:
         _enabled.set()
         _log("[VOICE] Wake-word listening enabled by user.")
+        _enqueue({"type": "mic", "listening": False, "note": "Restarting microphone..."})
     else:
-        _voice_active = False
-        _voice_error = "Voice disabled by user"
         _enabled.clear()
         _log("[VOICE] Wake-word listening disabled by user (mic closed).")
-        _enqueue({"type": "status", "text": _voice_error})
+        _set_mic_listening(False, "Wake word off")
 
 SAMPLE_RATE = 16000
 CHUNK_SAMPLES = 1280        # 80ms at 16kHz — openWakeWord's expected frame size
@@ -80,10 +168,6 @@ _last_near_miss_log = 0.0
 # Energy-VAD fallback threshold, adapted to the measured ambient level at stream
 # open (the fixed 0.01 was too high for low-gain mics and stalled end-of-speech).
 _speech_energy_threshold = 0.01
-
-# One-time diagnostics state (populated by the audio thread)
-_logged_predict_errors: set = set()
-_last_near_miss_log = 0.0
 
 
 # Runtime device override — set via set_mic_device() or JARVIS_MIC_DEVICE env.
@@ -144,21 +228,16 @@ def _resolve_input_device():
 def register_client(ws):
     with _lock:
         _clients.append(ws)
-    # Immediately inform new client of current status
-    if _voice_error:
-        try:
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                asyncio.ensure_future(ws.send_json({"type": "status", "text": _voice_error}))
-        except Exception:
-            pass
-    elif _voice_active:
-        try:
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                asyncio.ensure_future(ws.send_json({"type": "status", "text": "Wake word listener active"}))
-        except Exception:
-            pass
+    # Immediately inform the new client of the real mic state, so the UI
+    # indicator is correct from the first frame (WS-connected != listening).
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            asyncio.ensure_future(ws.send_json(
+                {"type": "mic", "listening": bool(_voice_active),
+                 "note": _voice_error or ""}))
+    except Exception:
+        pass
 
 def unregister_client(ws):
     with _lock:
@@ -230,13 +309,11 @@ def _audio_thread():
         from openwakeword.model import Model as OWWModel
     except ImportError as e:
         _log(f"[VOICE] Voice dependencies missing: {e}. Voice features disabled.")
-        _voice_error = "Voice disabled (dependencies missing)"
-        _enqueue({"type": "status", "text": _voice_error})
+        _set_mic_listening(False, "Voice off (deps missing)")
         return
     except Exception as e:
         _log(f"[VOICE] Failed to import audio libs: {e}")
-        _voice_error = "Voice disabled (import error)"
-        _enqueue({"type": "status", "text": _voice_error})
+        _set_mic_listening(False, "Voice off (import error)")
         return
 
     try:
@@ -246,16 +323,11 @@ def _audio_thread():
         _log("[VOICE] Wake word model loaded. Listening for 'Hey Jarvis'...")
     except Exception as e:
         _log(f"[VOICE] Failed to load wake word model: {e}")
-        _voice_error = f"Voice disabled (model load failed: {e})"
-        _enqueue({"type": "status", "text": _voice_error})
+        _set_mic_listening(False, "Voice off (model load failed)")
         return
 
     # Try loading Silero VAD (non-fatal if fails)
     _load_silero_vad()
-
-    _voice_active = True
-    _voice_error = ""
-    _enqueue({"type": "status", "text": "Wake word listener active"})
 
     recording = False
     recorded_frames: list[np.ndarray] = []
@@ -298,17 +370,17 @@ def _audio_thread():
                 callback=callback,
             ):
                 _log(f"[VOICE] Microphone stream open on '{dev_name}'. Wake word listener active.")
-                _voice_active = True
-                _voice_error = ""
+                _set_mic_listening(True)
                 retry_delay = 5
 
                 # Mic health check: a muted/dead input delivers pure silence, and
                 # the wake word can never fire — warn loudly instead of silently
-                # listening to nothing forever. 6s window: Bluetooth mics stay
+                # listening to nothing forever. Short window: Bluetooth mics stay
                 # silent for the first few seconds while the Hands-Free profile
                 # engages, and would otherwise false-alarm.
                 hc_peak = 0.0
-                hc_until = time.time() + 2.0  # reduced from 6s → 2s to shrink the OWW warm-up blind window
+                hc_secs = 2.0
+                hc_until = time.time() + hc_secs
                 while time.time() < hc_until:
                     try:
                         hc_audio = audio_q.get(timeout=0.5)
@@ -318,10 +390,12 @@ def _audio_thread():
                 if hc_peak < MIC_SILENCE_RMS:
                     _log(
                         f"[VOICE] WARNING: microphone '{dev_name}' is delivering silence "
-                        f"(peak RMS {hc_peak:.5f} over 6s) — wake word cannot fire. "
+                        f"(peak RMS {hc_peak:.5f} over {hc_secs:.0f}s) — wake word cannot fire. "
                         f"Check that the mic isn't muted and is the Windows default input, "
                         f"or set JARVIS_MIC_DEVICE in backend/.env to another input device name."
                     )
+                    _enqueue({"type": "status",
+                              "text": "Microphone appears muted or silent — wake word can't fire"})
                 # Adapt the energy-VAD fallback to this mic's ambient level
                 global _speech_energy_threshold
                 _speech_energy_threshold = min(max(0.003, hc_peak * 3.0), 0.05)
@@ -339,6 +413,22 @@ def _audio_thread():
                     except queue.Empty:
                         continue
 
+                    if is_ducked():
+                        # VEGA is speaking: never wake on its own voice, drop any
+                        # recording already in progress (it can only contain VEGA),
+                        # and reset the model buffer so a wake right after speech
+                        # needs a fresh user utterance.
+                        if recording:
+                            recording = False
+                            recorded_frames = []
+                            vad_buffer = np.zeros(0, dtype=np.float32)
+                            _log("[VOICE] Dropped in-progress recording (VEGA was speaking).")
+                        try:
+                            oww.reset()
+                        except Exception:
+                            pass
+                        continue
+
                     if not recording:
                         audio_int16 = (audio * 32767).astype(np.int16)
                         try:
@@ -350,32 +440,32 @@ def _audio_thread():
                                 _log(f"[VOICE] Wake model predict failed: {err_key}")
                             continue
 
-                        top_score = 0.0
-                        for model_name, score in oww.prediction_buffer.items():
-                            if len(score) > 0 and score[-1] > WAKE_THRESHOLD:
-                                oww.reset()
-                                recording = True
-                                recorded_frames = []
-                                vad_buffer = np.zeros(0, dtype=np.float32)
-                                if _vad_model is not None and hasattr(_vad_model, "reset_states"):
-                                    try:
-                                        _vad_model.reset_states()
-                                    except Exception:
-                                        pass
-                                silence_start = 0.0
-                                record_start = time.time()
-                                _enqueue({"type": "wake"})
-                                _enqueue({"type": "listening"})
-                                break
-                            if len(score) > 0:
-                                top_score = max(top_score, float(score[-1]))
+                        if wake_fired(oww.prediction_buffer, WAKE_THRESHOLD):
+                            oww.reset()
+                            recording = True
+                            recorded_frames = []
+                            vad_buffer = np.zeros(0, dtype=np.float32)
+                            if _vad_model is not None and hasattr(_vad_model, "reset_states"):
+                                try:
+                                    _vad_model.reset_states()
+                                except Exception:
+                                    pass
+                            silence_start = 0.0
+                            record_start = time.time()
+                            _enqueue({"type": "wake"})
+                            _enqueue({"type": "listening"})
+                        else:
+                            top_score = 0.0
+                            for score in oww.prediction_buffer.values():
+                                if len(score) > 0:
+                                    top_score = max(top_score, float(score[-1]))
 
-                        if not recording and top_score >= WAKE_THRESHOLD * 0.5 \
-                                and time.time() - _last_near_miss_log > 5:
-                            _last_near_miss_log = time.time()
-                            _log(f"[VOICE] Near-miss wake score {top_score:.2f} "
-                                 f"(threshold {WAKE_THRESHOLD}) — if these never climb, "
-                                 f"check the mic level/device.")
+                            if top_score >= WAKE_THRESHOLD * 0.5 \
+                                    and time.time() - _last_near_miss_log > 5:
+                                _last_near_miss_log = time.time()
+                                _log(f"[VOICE] Near-miss wake score {top_score:.2f} "
+                                     f"(threshold {WAKE_THRESHOLD}) — if these never climb, "
+                                     f"check the mic level/device.")
                     else:
                         recorded_frames.append(audio)
                         elapsed = time.time() - record_start
@@ -425,12 +515,10 @@ def _audio_thread():
             err_str = str(e).lower()
             if "no input" in err_str or "device" in err_str or "portaudio" in err_str:
                 _log(f"[VOICE] Microphone not available: {e}. Retrying in {retry_delay}s...")
-                _voice_active = False
-                _voice_error = "Voice disabled (No Mic)"
-                _enqueue({"type": "status", "text": _voice_error})
+                _set_mic_listening(False, "Voice off (no microphone)")
             else:
                 _log(f"[VOICE] Audio stream error: {e}. Retrying in {retry_delay}s...")
-                _enqueue({"type": "status", "text": f"Voice error: {e}"})
+                _set_mic_listening(False, f"Voice error: {type(e).__name__}")
 
             # Clear queue
             while not audio_q.empty():
@@ -470,66 +558,64 @@ def _preload_whisper():
     except Exception as e:
         _log(f"[VOICE] Whisper preload failed (will retry on first transcription): {e}")
 
+def transcribe_source(src):
+    """Transcribe an audio source (file path or file-like) with VEGA's guarded
+    command settings — shared by the wake-word pipeline and the manual-mic
+    /api/transcribe endpoint so both behave identically. Fully offline: local
+    faster-whisper only, no network, no API key.
+
+    Hallucination guards: no long vocab-biasing prompt (it bent off-topic
+    speech toward app names), temperature pinned, timestamps skipped.
+    Returns the cleaned transcript ('' for silence/hallucination fillers).
+    """
+    model = _get_whisper()
+    t0 = time.time()
+    segments, info = model.transcribe(
+        src,
+        beam_size=1,
+        language="en",
+        vad_filter=True,
+        vad_parameters={"min_silence_duration_ms": 300},
+        condition_on_previous_text=False,
+        without_timestamps=True,
+        temperature=0.0,
+        initial_prompt=INITIAL_PROMPT,
+    )
+    raw = " ".join(seg.text for seg in segments).strip()
+    trimmed = getattr(info, "duration_after_vad", None) or getattr(info, "duration", 0)
+    _log(f"[VOICE] Transcribed {trimmed:.1f}s of audio (after VAD trim) "
+         f"in {time.time()-t0:.1f}s")
+    return filter_hallucination(raw)
+
+
+def _audio_to_wav_bytes(audio_np):
+    """In-memory 16kHz mono int16 WAV from float32 frames."""
+    buf = io.BytesIO()
+    with wave.open(buf, 'wb') as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(SAMPLE_RATE)
+        wf.writeframes((audio_np * 32767).astype(np.int16).tobytes())
+    buf.seek(0)
+    return buf
+
+
 def _transcribe_and_dispatch(frames: list[np.ndarray]):
     """Transcribe recorded audio and push result to WebSocket clients."""
     try:
-        audio = np.concatenate(frames)
-
-        if len(audio) < SAMPLE_RATE * 0.3:
-            _log("[VOICE] Recording too short, skipping")
-            _enqueue({"type": "status", "text": "Recording too short"})
-            return
-
-        # Skip recordings that never contained audible speech (false wake) —
-        # transcribing 15s of near-silence burns ~15s of CPU for nothing.
-        peak = float(np.max(np.abs(audio)))
-        if peak < QUIET_RECORD_PEAK:
-            _log(f"[VOICE] Recording had no audible speech (peak {peak:.4f}) — skipping transcription")
-            _enqueue({"type": "status", "text": "No speech captured"})
+        audio = np.concatenate(frames) if frames else np.zeros(0, dtype=np.float32)
+        peak = float(np.max(np.abs(audio))) if len(audio) else 0.0
+        reason = recording_skip_reason(len(audio), peak)
+        if reason:
+            # False wake / dead capture: tell the UI honestly instead of
+            # burning ~15s of CPU transcribing silence.
+            _log(f"[VOICE] {reason} (peak {peak:.4f}) — skipping transcription")
+            _enqueue({"type": "status", "text": reason})
             return
 
         # Clip to [-1, 1] before int16 conversion to avoid overflow
         audio = np.clip(audio, -1.0, 1.0)
-
-        buf = io.BytesIO()
-        with wave.open(buf, 'wb') as wf:
-            wf.setnchannels(1)
-            wf.setsampwidth(2)
-            wf.setframerate(SAMPLE_RATE)
-            wf.writeframes((audio * 32767).astype(np.int16).tobytes())
-        buf.seek(0)
-
-        model = _get_whisper()
-
-        # Hallucination guards: no long vocab-biasing prompt (it bent off-topic
-        # speech toward app names), temperature pinned, timestamps skipped.
-        t0 = time.time()
-        segments, info = model.transcribe(
-            buf,
-            beam_size=1,
-            language="en",
-            vad_filter=True,
-            vad_parameters={"min_silence_duration_ms": 300},
-            condition_on_previous_text=False,
-            without_timestamps=True,
-            temperature=0.0,
-            initial_prompt="The user gives a short spoken command or question.",
-        )
-        transcript = " ".join(seg.text for seg in segments).strip()
-        trimmed = getattr(info, "duration_after_vad", None) or getattr(info, "duration", 0)
-        _log(f"[VOICE] Transcribed {len(audio)/SAMPLE_RATE:.1f}s of audio "
-             f"({trimmed:.1f}s after VAD trim) in {time.time()-t0:.1f}s")
-
-        # Known Whisper hallucination fillers — treat as silence, not speech
-        low = transcript.lower().strip()
-        hallucinations = (
-            "thank you for watching", "thanks for watching", "thank you for listening",
-            "thanks for listening", "subscribe to", "see you in the next video",
-            "stay tuned", "music [music]", "[music]", "♪",
-        )
-        if transcript and any(h in low for h in hallucinations) and len(low) < 60:
-            _log(f"[VOICE] Hallucination pattern filtered: {transcript[:60]!r}")
-            transcript = ""
+        transcript = transcribe_source(_audio_to_wav_bytes(audio))
 
         if transcript:
             _log(f"[VOICE] Transcript: {transcript}")
@@ -540,7 +626,7 @@ def _transcribe_and_dispatch(frames: list[np.ndarray]):
 
     except Exception as e:
         _log(f"[VOICE] Transcription error: {e}")
-        _enqueue({"type": "error", "text": str(e)})
+        _enqueue({"type": "error", "text": str(e)[:200]})
 
 # ──────────────────────────────────────────────
 # Async dispatcher (runs in the FastAPI event loop)
