@@ -6,7 +6,7 @@
 
 ---
 
-## ✨ What it does
+## ✨ What it does 
 
 Press **`Ctrl+Space`** anywhere — the dashboard animates in over your desktop.
 
