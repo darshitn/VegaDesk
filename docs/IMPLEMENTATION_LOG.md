@@ -312,4 +312,136 @@ This is a restart point for Antigravity, not proof that historical handoff claim
 - **Next Step:**
   - **P1-D2**: Additive schema migration verification (testing v1->v5 migration path from temporary older SQLite schemas, database backup creation, and recovery under partial/corrupted conditions).
 
+---
+
+## 2026-10-01 — Repository cleanup, roadmap consolidation, and test suite disambiguation
+
+### 1. Baseline and Protection
+- **Branch**: `main`, HEAD: `f5f4bcd`.
+- **User Data Protection**: `.env`, `backend/jarvis.db`, `backend/jarvis.db.bak-*`, credentials, installed models, and personal files were strictly untouched. No resets, clean, stash, or git commits/pushes were performed.
+- **Editing Agent**: Single editing agent; no concurrent file modifications.
+
+### 2. Inventory and Cleanup Decisions
+- **Duplicate Document Removal**:
+  - `BUILDPLAN.md` in repository root was an exact byte-for-byte duplicate of `docs/history/2026-qoder/JARVIS_ORIGINAL_BUILDPLAN.md` left behind from the initial repository commit. Removed using `git rm` (safe deletion: preserved identically in `docs/history/2026-qoder/`).
+- **Generated Boilerplate Removal**:
+  - `frontend/README.md` contained only default Vite template scaffolding text with zero project-specific content. Removed using `git rm`.
+- **Historical Test Suite Disambiguation**:
+  - Renamed 3 test files in `backend/tests/` using `git mv` to resolve naming collisions with the current AgentOS Phase 1 roadmap:
+    - `backend/tests/test_p1_stage1.py` -> `backend/tests/test_duration_and_completion.py` (describes word-number duration parsing and deterministic task completion routing).
+    - `backend/tests/test_p2_workspaces.py` -> `backend/tests/test_workspaces.py` (directly matches `backend/workspaces.py`).
+    - `backend/tests/test_p3_academic.py` -> `backend/tests/test_academic.py` (describes coursework and study suggestions).
+  - Updated docstring headers in all three files to remove stale stage/phase prefixes.
+- **Historical Antigravity Prompts Archival**:
+  - Created `docs/history/2026-antigravity/` and moved completed milestone prompts via `git mv`:
+    - `docs/ANTIGRAVITY_P1B_REVIEW_FIX.md` -> `docs/history/2026-antigravity/ANTIGRAVITY_P1B_REVIEW_FIX.md`
+    - `docs/ANTIGRAVITY_P1C1_APP_LAUNCH.md` -> `docs/history/2026-antigravity/ANTIGRAVITY_P1C1_APP_LAUNCH.md`
+    - `docs/ANTIGRAVITY_P1D1_SCHEDULER_RECOVERY.md` -> `docs/history/2026-antigravity/ANTIGRAVITY_P1D1_SCHEDULER_RECOVERY.md`
+    - `docs/ANTIGRAVITY_P1D1_CORRECTION.md` -> `docs/history/2026-antigravity/ANTIGRAVITY_P1D1_CORRECTION.md`
+  - Retained `docs/ANTIGRAVITY_START.md` (initial run guide) and `docs/ANTIGRAVITY_P1D2_MIGRATION_VERIFICATION.md` (active prompt for the next uncompleted milestone).
+- **Authoritative Product Reality Report**:
+  - Tracked `docs/VEGA_PROJECT_REALITY_REPORT_2026-10-01.md` in Git (`git add`), making it the single authoritative product status report.
+- **Roadmap & Documentation Consolidation**:
+  - Updated `README.md` to prominently link the product reality report, active plan (`docs/PHASE1_PLAN.md`), and implementation log.
+  - Added an explicit "Roadmap & Architecture Clarity" section distinguishing historical Qoder-era P1/P2/P3 feature prototypes (chat, workspaces, coursework) from active AgentOS Phase 1 execution hardening (policy, verification, receipts, scheduler recovery).
+  - Corrected Whisper model defaults in `README.md` to `small.en` (configurable via `WHISPER_MODEL`) and corrected the frontend test runner description to Node test runner (`node --test`).
+  - Added a clarifying header to `docs/PHASE1_PLAN.md` referencing the reality report and defining the boundary of AgentOS Phase 1.
+
+### 3. Verification and Validation Results
+- **Backend Renamed Suites**: `python -m pytest tests/test_duration_and_completion.py tests/test_workspaces.py tests/test_academic.py` -> **61 passed**, 1 warning in 4.55s.
+- **Full Backend Suite**: `python -m pytest` -> **371 passed**, 1 Starlette deprecation warning in 27.88s on Python 3.14.3.
+- **Frontend Suite**: `npm test --prefix frontend` -> **19 passed** in 230ms (`node --test`).
+- **Frontend Linter**: `npm run lint --prefix frontend` -> **0 errors**, 17 warnings (Oxlint).
+- **Frontend Production Build**: `npm run build --prefix frontend` -> Vite build successful (all bundles and Electron main/preload compiled cleanly).
+- **Whitespace & Formatting**: `git diff --check` -> **0 errors**.
+
+### 4. Deliberately Retained Items
+- `AGENTS.md`: Retained intact as required by system rules.
+- `backend/jarvis-backend.spec`: Retained for PyInstaller desktop packaging (`datas` is configured to prevent bundling personal data).
+- `docs/history/2026-qoder/`: 15 historical reference documents retained for historical provenance.
+- `docs/ANTIGRAVITY_START.md` & `docs/ANTIGRAVITY_P1D2_MIGRATION_VERIFICATION.md`: Retained in `docs/` to guide execution of the next active milestone.
+
+### 5. Remaining Uncertainty
+- Real Windows desktop toast notifications, microphone hardware latency, and electron-builder NSIS distribution remain desktop verification checks.
+
+### 6. Next Step
+- Resume AgentOS Phase 1 with **P1-D2**: Additive schema migration verification (testing v1->v5 migration path from temporary older SQLite schemas, database backup creation, and recovery under partial/corrupted conditions) as defined in `docs/ANTIGRAVITY_P1D2_MIGRATION_VERIFICATION.md` and `docs/PHASE1_PLAN.md`.
+
+## 2026-10-01 — Current Antigravity guide after cleanup
+
+- **Scope:** Documentation handoff only. Current `main` HEAD is `f5f4bcd`; existing staged cleanup changes and unstaged edits were preserved. No application code, personal database, credentials, or build output was changed.
+- **Source findings:** P1-D2 remains uncompleted in the log and reality report. `migrations.py` still copies database files with `shutil.copy2`, uses second-resolution backup names, and stamps versions before the final `create_all`. These are investigation targets for the implementation run, not new runtime results.
+- **Guide:** Expanded `ANTIGRAVITY_P1D2_MIGRATION_VERIFICATION.md` with scope, a paste-ready prompt, supported fixture matrix, WAL backup checks, backup failure handling, interrupted upgrade checks, acceptance criteria, and handoff format. One editing agent and bounded read-only reviewers are specified.
+- **Documentation corrections:** Replaced the active start guide's P1-A/P1-B instructions with current P1-D2 start/resume instructions, preserving the original in `history/2026-antigravity/ANTIGRAVITY_START_ORIGINAL_2026-10-01.md`. Added README links and corrected the reality report's stale README statement. A read-only reviewer independently checked roadmap and documentation consistency.
+- **Evidence:** Documentation and migration source were inspected. Application test suites were not rerun for this documentation-only change; the cleanup report's 371 backend / 19 frontend results remain agent-reported.
+- **Checks:** `git diff --check` and `git diff --cached --check` passed. A PowerShell check resolved every local Markdown link in the two active Antigravity guides.
+- **Next:** Antigravity implements and verifies P1-D2, then stops. Review the resulting code/report before preparing P1-E service/provider readiness.
+
+---
+
+## 2026-10-01 — P1-D2: SQLite additive migration and backup reliability
+
+### 1. Baseline and Preservation
+- **Branch**: `main`, HEAD: `f5f4bcd0a86e4745db7243873811421b10bbd77e`.
+- **Preserved state**:
+  - Staged cleanup items (deleted `BUILDPLAN.md`, deleted `frontend/README.md`, renamed test files `test_academic.py`, `test_duration_and_completion.py`, `test_workspaces.py`, tracked `docs/VEGA_PROJECT_REALITY_REPORT_2026-10-01.md`, and archived prompts in `docs/history/2026-antigravity/`) were strictly preserved.
+  - `.env`, personal database `backend/jarvis.db`, its `.bak-*` files, WAL files, credentials, and build artifacts were strictly untouched. No resets, clean, stash, stage, or git commits/pushes were performed.
+- **Editing Agent**: Single editing agent; no concurrent file modifications.
+- **Subagent Limitation Note**: Autonomous coding subagents are unavailable in this environment (declarations only provide `browser_subagent` for web interaction). Sequential read-only reviews were conducted:
+  1. *Review 1 (Failure modes)*: Inspected `backend/migrations.py`, `backend/db.py`, and `backend/main.py`. Found that `shutil.copy2` loses uncheckpointed WAL commits, backup filename allocation can collide in the same second, `_sync_indexes` failed on legacy tables lacking newer columns, and `schema_version` was stamped before `create_all`.
+  2. *Review 2 (Historical fixtures & coverage)*: Traced historical migration contracts (legacy unversioned v0, v1, v2, v3, v4, v5) from migration history, ensuring fixtures match true historical schemas rather than current schemas with altered stamps.
+
+### 2. Migration and Backup Hardening Decisions
+- **Consistent Backup via SQLite Online Backup API**:
+  - Replaced `shutil.copy2` with `sqlite3.Connection.backup()`. In WAL mode, `shutil.copy2` copies only the main database file, missing uncheckpointed pages residing in the `-wal` file. `sqlite3.Connection.backup()` cleanly captures committed WAL data even with open connections.
+  - Backup creation is executed *before* acquiring migration write locks, preventing self-deadlocks.
+  - Backups are immediately validated via `PRAGMA integrity_check` on a separate connection.
+  - Timestamp collisions within the same second are resolved by appending collision-safe monotonic counters (`.bak-{timestamp}_{counter}`).
+- **Pre-flight Safety and Corruption Checks**:
+  - Added pre-migration `PRAGMA quick_check(1)` check. If a database file is corrupted, migration aborts immediately with `MigrationError` before any writes occur.
+  - Added `_read_and_validate_version()`: validates `schema_version` table structure and fails closed if the version table is malformed or if `version > CURRENT_SCHEMA_VERSION` (5).
+  - Added `_check_schema_consistency()`: detects and refuses unexplained schema inconsistencies (where `schema_version` claims a version ahead of actual columns present), while safely resuming known additive partial upgrades (e.g. columns already added prior to an interrupted migration).
+- **Atomic Transaction Ordering**:
+  - Table creation (`Base.metadata.create_all(bind=conn)`) and final schema validation (`_validate_final_schema()`) now execute inside the atomic `engine.begin()` transaction *before* updating `schema_version`. If table creation fails, the transaction rolls back, leaving the previous version stamp intact and the pre-migration backup unharmed.
+- **Robust Index Synchronization**:
+  - Hardened `_sync_indexes()` to inspect existing table columns and skip indexes whose columns do not yet exist, preventing `no such column` errors on older partial schemas.
+  - Added explicit `UNIQUE INDEX` creation when `idx.unique` is set on the model.
+
+### 3. Files Changed
+- `backend/migrations.py`: Implemented `MigrationError`, `sqlite3.Connection.backup()` with integrity validation and collision-safe naming, pre-migration corruption checks, schema consistency verification, safe index creation, and atomic transaction ordering.
+- `backend/tests/test_p1_d2_migration_verification.py`: New comprehensive test suite with 17 tests covering:
+  - Supported starting points: legacy unversioned v0, v1, v2, v3, v4, v5 (no-op), fresh DB.
+  - Sentinel rows (tasks, notes, receipts) preservation across migrations.
+  - WAL mode backup consistency with uncheckpointed commits and active connection.
+  - Same-second backup filename collision avoidance.
+  - Backup failure aborting without mutation.
+  - Corrupt database file rejection without mutation.
+  - Unsupported newer version (v6) rejection.
+  - Malformed `schema_version` rejection.
+  - Version stamp ahead of columns rejection (unexplained inconsistency).
+  - Known additive partial upgrade safe resumption.
+  - Mid-migration failure transaction rollback and backup preservation.
+  - Index uniqueness synchronization.
+- `docs/IMPLEMENTATION_LOG.md`: Documented P1-D2 implementation, decisions, test evidence, boundaries, and next step.
+
+### 4. Verification and Exact Results
+- **Focused Migration Suites**:
+  - `python -m pytest tests/test_migrations.py` -> **6 passed** in 3.01s.
+  - `python -m pytest tests/test_p1_d2_migration_verification.py` -> **17 passed** in 5.21s.
+  - Combined migration tests (23 tests): `python -m pytest tests/test_migrations.py tests/test_p1_d2_migration_verification.py` -> **23 passed** in 7.07s.
+- **Full Backend Suite (388 tests)**:
+  - `python -m pytest` -> **388 passed**, 1 Starlette deprecation warning in 47.07s on Python 3.14.3.
+- **Formatting & Whitespace Check**:
+  - `git diff --check` -> **0 errors**.
+
+### 5. Evidence Boundary
+- **Hermetic Automated Tests**: All verification ran against synthetic, temporary file-backed SQLite databases (`tmp_path`) and synthetic fixtures.
+- **Untested Personal Database**: The personal database (`backend/jarvis.db`, `.bak-*`, WAL files, `.env`) remains completely untouched and untested.
+
+### 6. Remaining Risks and Limitations
+- **External Multi-process Locks**: SQLite acquires a file-level write lock during backup and migration. If an external process locks the database exclusively for longer than the 10-second timeout, `MigrationError` will be raised safely without data loss.
+- **Disk Space**: While backup creation fails closed if disk space is exhausted before schema mutation, running migrations on a nearly full disk could fail during the SQLite vacuum/checkpoint stage.
+
+### 7. Next Step
+- **P1-E**: Service and model provider readiness and fault isolation (truthful `/health` reporting of provider, voice, and scheduler availability; ensuring model provider outages do not degrade deterministic local commands). Do not start P1-E in this run.
 

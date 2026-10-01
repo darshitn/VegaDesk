@@ -1,6 +1,8 @@
-# Phase 1 — core foundation plan
+# Phase 1 — core foundation plan (AgentOS)
 
-Status: implementation guide; current source must be checked at each session. Do not mark an item complete because a historical handoff says so.
+**Status:** Implementation guide; current source must be checked at each session. Do not mark an item complete because a historical handoff says so.
+**Product context:** See [docs/VEGA_PROJECT_REALITY_REPORT_2026-10-01.md](VEGA_PROJECT_REALITY_REPORT_2026-10-01.md) for the current product reset report and roadmap reality check.
+**Roadmap distinction:** This document specifies **AgentOS Phase 1** — the foundation hardening of policy, verifiers, truthful action receipts, scheduler restart recovery, and provider contracts. This is distinct from historical "P1/P2/P3" labels found in `docs/history/2026-qoder/` (which prototyped chat, workspaces, and coursework). Those prototypes exist in the codebase; AgentOS Phase 1 hardens their execution without greenfield rewrites.
 
 ## First assessment
 

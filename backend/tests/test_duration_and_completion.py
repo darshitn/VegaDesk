@@ -1,12 +1,11 @@
-"""Stage 1 (overnight 5h run): close the two measured P1 gaps.
+"""Tests for duration parsing and deterministic task completion routing.
 
-Covers, all offline against the temp DB:
-  * bounded English word-number durations (the 'twenty minutes' miss), on the
+Covers, all offline against temporary SQLite DBs:
+  * bounded English word-number durations (e.g. 'twenty minutes'), on the
     shared parse_duration_seconds used by BOTH the deterministic parser and the
     model 'duration_text' lane;
-  * deterministic completion routing (the misroute-to-list_tasks miss) incl. the
-    exact compound phrase from the live eval;
-  * the safety rule that a read is never turned into an unintended write: an
+  * deterministic completion routing (preventing misroute to list_tasks);
+  * safety rule that a read is never turned into an unintended write: an
     ambiguous 'similarly named pair' clarifies and mutates nothing.
 """
 

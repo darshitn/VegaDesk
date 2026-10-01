@@ -2,7 +2,19 @@
 
 > A local-first Windows personal agent: conversational AI brain, real-time telemetry, voice control, and a hardened tool-execution engine — all running on your machine.
 
-**Docs:** [Agent instructions](AGENTS.md) · [Product brief](docs/VEGA_AGENTOS_BRIEF.md) · [Phase 1 plan](docs/PHASE1_PLAN.md) · [Implementation log](docs/IMPLEMENTATION_LOG.md)
+**Authoritative Docs:** [Product reality report](docs/VEGA_PROJECT_REALITY_REPORT_2026-10-01.md) · [Active Phase 1 plan](docs/PHASE1_PLAN.md) · [Implementation log](docs/IMPLEMENTATION_LOG.md) · [Architecture brief](docs/VEGA_AGENTOS_BRIEF.md) · [Agent instructions](AGENTS.md)
+
+**Next Antigravity run:** P1-E service/provider readiness · [Start/resume instructions](docs/ANTIGRAVITY_START.md)
+
+---
+
+## 🧭 Project Roadmap & Direction
+
+- **One Authoritative Reality Report:** [docs/VEGA_PROJECT_REALITY_REPORT_2026-10-01.md](docs/VEGA_PROJECT_REALITY_REPORT_2026-10-01.md) defines what VEGA actually is today: an implemented local personal productivity assistant for studies and projects, with voice as an input method, undergoing foundation hardening.
+- **One Active Implementation Plan:** [docs/PHASE1_PLAN.md](docs/PHASE1_PLAN.md) outlines the active **AgentOS Phase 1** foundation milestones (P1-A through P1-E).
+- **Roadmap Clarity (Historical P1/P2/P3 vs AgentOS Phase 1):**
+  - **Historical P1/P2/P3 (Qoder-era prototypes in `docs/history/2026-qoder/`):** Created the initial feature prototypes — model provider lanes, durable workspaces/session drafts, and coursework planning. These features are implemented and active in the repository.
+  - **AgentOS Phase 1 (Active core foundation):** Hardens execution security and reliability across those existing features without rewrites — centralized Risk 0..3 policy enforcement (`policy.py`), verified initiation (`verifier.py`), truthful SQLite receipts (`ActionReceipt`), and scheduler restart recovery (`scheduler.py`).
 
 ---
 
@@ -70,14 +82,14 @@ You can also switch AI engines per-session from the dashboard settings (⚙ icon
 
 1. **Wake word** — say **"Hey Jarvis"** (normal volume). Uses openWakeWord `hey_jarvis`, fully local.
 2. **Capture** — Silero VAD detects when you stop speaking (~1 s silence).
-3. **Transcription** — local `faster-whisper` (base, int8, English, VAD-trimmed). No network, no keys.
+3. **Transcription** — local `faster-whisper` (defaults to `small.en`, int8 on CPU, VAD-trimmed). No network, no keys.
 4. **Action** — transcript is sent to chat; "open …" commands resolve through the fast path and the dashboard steps aside so the app lands on top.
 
 **Bluetooth users:** keeping the mic stream open forces classic-BT headsets into Hands-Free mode, degrading playback quality. Use **Settings → Wake Word** to toggle the mic off and restore full audio.
 
 **Mic selection:** set `JARVIS_MIC_DEVICE=<name substring>` in `backend/.env` to pin a device. The backend health-checks the mic for 6 s on startup and warns loudly if it's silent.
 
-**Whisper model:** edit `WhisperModel("base", ...)` in `backend/voice_service.py`. `"tiny.en"` is ~2× faster; `"small"` is more accurate.
+**Whisper model:** defaults to `small.en` for high accuracy. Configure via `WHISPER_MODEL` environment variable (e.g. `WHISPER_MODEL=base.en` or `WHISPER_MODEL=tiny.en` for lower CPU latency).
 
 > **Naming note:** the assistant is branded **V.E.G.A.**; the wake phrase is **"Hey Jarvis"** — tied to the pretrained openWakeWord model. Renaming the spoken phrase requires a custom wake-word model.
 
@@ -119,11 +131,15 @@ Settings: theme, LLM engine, summon sound, launch-on-startup, wake word, gesture
 
 ```bash
 # Backend (from jarvis-dashboard/backend/)
-python -m pytest                          # full suite (~370 tests)
-python -m pytest tests/test_scheduler.py  # scheduler + recovery
+python -m pytest                                            # full suite (388 tests)
+python -m pytest tests/test_p1_d2_migration_verification.py # migrations & backup reliability
+python -m pytest tests/test_p1_d1_scheduler_recovery.py     # scheduler recovery
+python -m pytest tests/test_workspaces.py                  # workspaces & session drafts
+python -m pytest tests/test_academic.py                    # coursework & academic suggestions
 
 # Frontend (from jarvis-dashboard/)
-npm test --prefix frontend                # Vitest suite
+npm test --prefix frontend                                  # Node test runner suite (19 tests)
+npm run lint --prefix frontend                              # Oxlint check
 ```
 
 Tests use temporary SQLite databases, synthetic clocks (`FakeClock`), and fake listeners. No real app launches, desktop notifications, or personal data are touched.
@@ -133,7 +149,7 @@ Tests use temporary SQLite databases, synthetic clocks (`FakeClock`), and fake l
 ## 📦 Packaging notes
 
 - `npm run build:win` compiles the backend with PyInstaller and packages with electron-builder.
-- The PyInstaller spec (`backend/jarvis-backend.spec`) is **not** used by the build scripts — it embeds `.env` and `jarvis.db` into the exe; do not ship it.
+- The PyInstaller spec (`backend/jarvis-backend.spec`) is maintained for the desktop build pipeline; `datas` is configured to prevent bundling personal databases or credentials.
 - On quit, the packaged backend child tree is killed via `taskkill /T` (PyInstaller onefile spawns a child that survives a plain kill).
 - Single-instance lock: a second launch focuses the existing dashboard instead of spawning a duplicate.
 
@@ -152,7 +168,16 @@ jarvis-dashboard/
 │   ├── migrations.py      # additive SQLite schema migrations
 │   ├── db.py              # SQLAlchemy models
 │   ├── providers/         # Gemini + Ollama provider adapters
-│   ├── tests/             # pytest suite (~370 tests)
+│   ├── tests/             # pytest suite (388 tests)
+│   │   ├── test_p1_b_vertical_slice.py
+│   │   ├── test_p1_c1_app_launch.py
+│   │   ├── test_p1_c2_policy_enforcement.py
+│   │   ├── test_p1_d1_scheduler_recovery.py
+│   │   ├── test_p1_d2_migration_verification.py
+│   │   ├── test_duration_and_completion.py
+│   │   ├── test_workspaces.py
+│   │   ├── test_academic.py
+│   │   └── ...
 │   └── ...
 ├── frontend/
 │   ├── src/
@@ -160,10 +185,16 @@ jarvis-dashboard/
 │   │   ├── components/    # AIBrain, ProductivityHub, LiveFeeds, AIRadarPanel, …
 │   │   ├── hooks/         # useChat
 │   │   └── lib/           # chatStore, voiceState
-│   └── tests/             # Vitest suite
+│   └── tests/             # Node test runner suite (19 tests)
 ├── docs/
-│   ├── VEGA_AGENTOS_BRIEF.md
-│   ├── PHASE1_PLAN.md
-│   └── IMPLEMENTATION_LOG.md
+│   ├── VEGA_PROJECT_REALITY_REPORT_2026-10-01.md  # Authoritative product reset report
+│   ├── PHASE1_PLAN.md                             # Active AgentOS Phase 1 plan
+│   ├── IMPLEMENTATION_LOG.md                      # Verifiable implementation history & evidence
+│   ├── VEGA_AGENTOS_BRIEF.md                      # Architecture brief & boundaries
+│   ├── ANTIGRAVITY_START.md                       # Initial execution guide
+│   ├── ANTIGRAVITY_P1D2_MIGRATION_VERIFICATION.md # Next active milestone prompt
+│   └── history/                                   # Historical prompts & legacy handoffs
+│       ├── 2026-qoder/
+│       └── 2026-antigravity/
 └── AGENTS.md              # AI agent instructions for this repo
 ```

@@ -1,10 +1,9 @@
-"""P2 acceptance-gate tests: durable workspaces, 'Resume my work', and session
-closure. Uses TEMP/COPIED databases only — the developer's jarvis.db is never
-touched. Covers the gate steps: create fixture project + next action + session
-note, RESTART the backend (new engine/session on the same file), resume via the
-typed command AND the read path, verify exact stored state, prove replay creates
-no duplicate, prove an ambiguous project clarifies with ZERO writes, and prove that
-the text the user EDITS into a session draft is what actually gets stored.
+"""Tests for durable workspaces, 'Resume my work', and session closure.
+Uses temporary SQLite databases only — user data is never touched. Covers:
+create project workspace + next action + session note, backend restart persistence
+(new engine/session on the same file), resume via typed command and read path,
+exact stored state verification, replay deduplication, ambiguous project clarification
+with zero writes, and verifying edited session draft persistence.
 """
 
 import pytest

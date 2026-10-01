@@ -1,11 +1,11 @@
-"""Stage 3 acceptance tests: the smallest academic loop on the workspace model.
+"""Tests for academic coursework and study suggestion loop.
 
 Covers: logging coursework (subject/kind/due/effort) offline via the typed
 command path; timezone + past/ambiguous due-date validation that writes NOTHING;
 the "I have N minutes" suggestion using due date + the user's own effort estimate
 with an editable alternative list; the daily briefing surfacing a due-soon item
 with a reason; completion; subject linkage (and the no-fabrication / ambiguity
-guards); and RESTART persistence. Temp/copied DBs only — jarvis.db is untouched.
+guards); and RESTART persistence. Temp/copied DBs only — user data is untouched.
 """
 
 from datetime import datetime
