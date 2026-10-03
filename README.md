@@ -2,9 +2,9 @@
 
 > A local-first Windows personal agent: conversational AI brain, real-time telemetry, voice control, and a hardened tool-execution engine — all running on your machine.
 
-**Authoritative Docs:** [Product reality report](docs/VEGA_PROJECT_REALITY_REPORT_2026-10-01.md) · [Active Phase 1 plan](docs/PHASE1_PLAN.md) · [Implementation log](docs/IMPLEMENTATION_LOG.md) · [Architecture brief](docs/VEGA_AGENTOS_BRIEF.md) · [Agent instructions](AGENTS.md)
+**Authoritative Docs:** [Product reality report](docs/VEGA_PROJECT_REALITY_REPORT_2026-10-01.md) · [Active Phase 1 plan](docs/PHASE1_PLAN.md) · [Implementation log](docs/IMPLEMENTATION_LOG.md) · [Architecture brief](docs/VEGA_AGENTOS_BRIEF.md) · [Beta Acceptance Checklist](docs/BETA_ACCEPTANCE_CHECKLIST.md)
 
-**Next Antigravity run:** P1-E service/provider readiness · [Start/resume instructions](docs/ANTIGRAVITY_START.md)
+**Supervised Beta Acceptance:** [Beta checklist & verification](docs/BETA_ACCEPTANCE_CHECKLIST.md) · [Start/resume instructions](docs/ANTIGRAVITY_START.md) · [Polished beta roadmap](docs/POLISHED_BETA_ROADMAP.md)
 
 ---
 
@@ -49,6 +49,14 @@ npm run dev           # starts backend (port 8000) + Vite + Electron together
 ```
 
 Stop everything with a single `Ctrl+C`.
+
+### Isolated Beta Acceptance Profile
+To verify the app in a strictly isolated, synthetic test profile without touching personal data:
+```bash
+npm run seed:beta     # Idempotently seeds synthetic tasks, projects, coursework
+npm run dev:beta      # Launches isolated backend (port 8005) and frontend in beta profile
+```
+See the full acceptance matrix in [docs/BETA_ACCEPTANCE_CHECKLIST.md](docs/BETA_ACCEPTANCE_CHECKLIST.md).
 
 ### Build a packaged installer
 

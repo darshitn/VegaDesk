@@ -2,6 +2,14 @@
 
 Date: 1 October 2026. Source review of main at f5f4bcd. This is a product reset report, not a new implementation milestone.
 
+**Later review update, 1 October:** P1-D2 implementation is now present at
+`60dd2da`. Codex reran 23 migration tests successfully, but additional temporary
+probes found incomplete schema validation and partial DDL persistence after an
+injected failure. Run [the correction](ANTIGRAVITY_P1D2_CORRECTION.md) before
+P1-E. The full 388-test result remains Antigravity-reported. See
+[the polished beta roadmap](POLISHED_BETA_ROADMAP.md) for the current sequence;
+the original report below records the earlier source snapshot.
+
 ## 1. The purpose, in plain English
 
 VEGA should help you start useful work, remember commitments, stay focused, and return to a project without reconstructing everything from memory. You should be able to speak or type in English. Everyday actions should work without buying API tokens.
