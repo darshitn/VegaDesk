@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react'
 import { Activity, Cpu, HardDrive, Zap, Wifi } from 'lucide-react'
+import { getWsBase } from '../lib/apiConfig'
 
 const formatBytes = (bytes, decimals = 1) => {
     if (!+bytes) return '0 B'
@@ -63,7 +64,7 @@ export default function SystemMonitor() {
         const connect = () => {
             if (isUnmounted) return
             try {
-                ws = new WebSocket('ws://localhost:8000/ws/system-stats')
+                ws = new WebSocket(`${getWsBase()}/ws/system-stats`)
             } catch {
                 setError(true)
                 connectTimer = setTimeout(connect, 3000)

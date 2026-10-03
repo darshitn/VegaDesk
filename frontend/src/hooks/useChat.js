@@ -1,17 +1,18 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
 import { loadMessages, saveMessages, clearMessages } from '../lib/chatStore'
+import { getApiBase, getApiPort, verifiedFetch } from '../lib/apiConfig'
 
 // Tell the backend wake-word listener that VEGA is speaking (or has stopped),
 // so the mic ignores VEGA's own voice. Fire-and-forget; the server also
 // safety-expires a stuck "ducked" flag on its own.
 function postVoiceDuck(active) {
   try {
-    fetch('http://localhost:8000/api/voice/duck', {
+    verifiedFetch(`${getApiBase()}/api/voice/duck`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ active }),
       keepalive: true,
-    }).catch(() => { /* backend down — server-side expiry re-arms the mic */ })
+    }).catch(() => { /* backend down or session unverified */ })
   } catch { /* no fetch */ }
 }
 
@@ -79,7 +80,7 @@ export default function useChat({ userName, provider }) {
     const controller = new AbortController()
     const timeoutId = setTimeout(() => controller.abort(), 90000)
     try {
-      const response = await fetch('http://localhost:8000/chat', {
+      const response = await verifiedFetch(`${getApiBase()}/chat`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ message: value, history, userName: un, provider: prov, source }),
@@ -108,7 +109,9 @@ export default function useChat({ userName, provider }) {
     } catch (err) {
       const msg = err && err.name === 'AbortError'
         ? 'Request timed out. Please try again.'
-        : 'Connection failed. Is the backend running on port 8000?'
+        : err?.message?.includes('Mutation blocked')
+          ? err.message
+          : `Connection failed. Is the backend running on port ${getApiPort()}?`
       setMessages(prev => [...prev, { role: 'assistant', content: `[SYSTEM ERROR] ${msg}` }])
     } finally {
       clearTimeout(timeoutId)

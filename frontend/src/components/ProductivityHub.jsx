@@ -1,7 +1,10 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
-import { Calendar, CheckCircle2, Circle, ListTodo, Plus, Trash2, PenTool, Timer as TimerIcon, BellRing, Target, Play, Square, X, FolderOpen, Rocket, NotebookPen, FolderPlus, GraduationCap } from 'lucide-react'
+import { Calendar, CheckCircle2, Circle, ListTodo, Plus, Trash2, PenTool, Timer as TimerIcon, BellRing, Target, Play, Square, X, FolderOpen, Rocket, NotebookPen, FolderPlus, GraduationCap, RefreshCw } from 'lucide-react'
+import { createFreshnessTracker } from '../lib/freshnessTracker'
+import { createMutationGuard } from '../lib/mutationGuard'
+import { getApiBase, verifiedFetch } from '../lib/apiConfig'
 
-const API = 'http://localhost:8000'
+const API = getApiBase()
 
 // Idempotency key for a single user action so retries (double-click, network
 // replay) never duplicate a write. Falls back if crypto.randomUUID is absent.
@@ -64,61 +67,143 @@ export default function ProductivityHub() {
   const [studyMinutes, setStudyMinutes] = useState('25')
   const [study, setStudy] = useState(null) // {window_minutes, suggestion, alternatives}
 
+  // Read freshness & sequencing tracking
+  const [freshness, setFreshness] = useState({
+    tasks: { loading: false, isStale: false, error: null, lastRefreshed: null },
+    hub: { loading: false, isStale: false, error: null, lastRefreshed: null },
+    projects: { loading: false, isStale: false, error: null, lastRefreshed: null },
+    today: { loading: false, isStale: false, error: null, lastRefreshed: null },
+    coursework: { loading: false, isStale: false, error: null, lastRefreshed: null },
+  })
+  const [trackerInstance] = useState(() => createFreshnessTracker())
+  const [guardInstance] = useState(() => createMutationGuard())
+  const trackerRef = useRef(trackerInstance)
+  const guardRef = useRef(guardInstance)
+  const [taskFilter, setTaskFilter] = useState('all')
+
+  const [pendingKeys, setPendingKeys] = useState(new Set())
+  const markPending = useCallback((key, active) => {
+    setPendingKeys(prev => {
+      const next = new Set(prev)
+      if (active) next.add(key)
+      else next.delete(key)
+      return next
+    })
+  }, [])
+
+  const [isAddingTask, setIsAddingTask] = useState(false)
+  const [isStartingTimer, setIsStartingTimer] = useState(false)
+  const [isAddingReminder, setIsAddingReminder] = useState(false)
+  const [isStartingFocus, setIsStartingFocus] = useState(false)
+  const [isEndingFocus, setIsEndingFocus] = useState(false)
+  const [isRegisteringProject, setIsRegisteringProject] = useState(false)
+  const [isSavingSessionNote, setIsSavingSessionNote] = useState(false)
+  const [isAddingCw, setIsAddingCw] = useState(false)
+
   const flash = useCallback((kind, text) => {
     setBanner({ kind, text })
     setTimeout(() => setBanner(b => (b && b.text === text ? null : b)), 5000)
   }, [])
 
   const fetchTasks = useCallback(async () => {
+    const seq = trackerRef.current.startRequest('tasks')
+    setFreshness(prev => ({ ...prev, tasks: trackerRef.current.getState('tasks') }))
     try {
       const res = await fetch(`${API}/api/tasks`)
-      setTasks(await res.json())
-    } catch (err) {
-      console.error('Failed to fetch tasks', err)
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      const data = await res.json()
+      if (trackerRef.current.completeSuccess('tasks', seq)) {
+        setTasks(data)
+        setFreshness(prev => ({ ...prev, tasks: trackerRef.current.getState('tasks') }))
+      }
+    } catch {
+      if (trackerRef.current.completeFailure('tasks', seq, 'Failed to refresh tasks')) {
+        setFreshness(prev => ({ ...prev, tasks: trackerRef.current.getState('tasks') }))
+      }
     }
   }, [])
 
   const fetchNotes = useCallback(async () => {
     try {
       const res = await fetch(`${API}/api/notes`)
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
       const data = await res.json()
-      if (data.text) setNoteText(data.text)
+      if (data && typeof data.text === 'string') setNoteText(data.text)
     } catch (err) {
       console.error('Failed to fetch notes', err)
     }
   }, [])
 
   const fetchHub = useCallback(async () => {
+    const seq = trackerRef.current.startRequest('hub')
+    setFreshness(prev => ({ ...prev, hub: trackerRef.current.getState('hub') }))
     try {
       const res = await fetch(`${API}/api/hub/state`)
-      if (res.ok) setHub(await res.json())
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      const data = await res.json()
+      if (trackerRef.current.completeSuccess('hub', seq)) {
+        setHub(data)
+        setFreshness(prev => ({ ...prev, hub: trackerRef.current.getState('hub') }))
+      }
     } catch {
-      /* backend offline — keep last known state */
+      if (trackerRef.current.completeFailure('hub', seq, 'Failed to refresh hub state')) {
+        setFreshness(prev => ({ ...prev, hub: trackerRef.current.getState('hub') }))
+      }
     }
   }, [])
 
   const fetchProjects = useCallback(async () => {
+    const seq = trackerRef.current.startRequest('projects')
+    setFreshness(prev => ({ ...prev, projects: trackerRef.current.getState('projects') }))
     try {
       const res = await fetch(`${API}/api/workspaces`)
-      if (res.ok) setProjects(await res.json())
-    } catch { /* backend offline */ }
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      const data = await res.json()
+      if (trackerRef.current.completeSuccess('projects', seq)) {
+        setProjects(data)
+        setFreshness(prev => ({ ...prev, projects: trackerRef.current.getState('projects') }))
+      }
+    } catch {
+      if (trackerRef.current.completeFailure('projects', seq, 'Failed to refresh projects')) {
+        setFreshness(prev => ({ ...prev, projects: trackerRef.current.getState('projects') }))
+      }
+    }
   }, [])
 
   const fetchToday = useCallback(async () => {
+    const seq = trackerRef.current.startRequest('today')
+    setFreshness(prev => ({ ...prev, today: trackerRef.current.getState('today') }))
     try {
       const res = await fetch(`${API}/api/today`)
-      if (res.ok) {
-        const data = await res.json()
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      const data = await res.json()
+      if (trackerRef.current.completeSuccess('today', seq)) {
         setToday(data.items || { next_actions: [], due_soon: [], active_focus: null })
+        setFreshness(prev => ({ ...prev, today: trackerRef.current.getState('today') }))
       }
-    } catch { /* backend offline */ }
+    } catch {
+      if (trackerRef.current.completeFailure('today', seq, 'Failed to refresh today')) {
+        setFreshness(prev => ({ ...prev, today: trackerRef.current.getState('today') }))
+      }
+    }
   }, [])
 
   const fetchCoursework = useCallback(async () => {
+    const seq = trackerRef.current.startRequest('coursework')
+    setFreshness(prev => ({ ...prev, coursework: trackerRef.current.getState('coursework') }))
     try {
       const res = await fetch(`${API}/api/coursework`)
-      if (res.ok) setCoursework(await res.json())
-    } catch { /* backend offline */ }
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      const data = await res.json()
+      if (trackerRef.current.completeSuccess('coursework', seq)) {
+        setCoursework(data)
+        setFreshness(prev => ({ ...prev, coursework: trackerRef.current.getState('coursework') }))
+      }
+    } catch {
+      if (trackerRef.current.completeFailure('coursework', seq, 'Failed to refresh coursework')) {
+        setFreshness(prev => ({ ...prev, coursework: trackerRef.current.getState('coursework') }))
+      }
+    }
   }, [])
 
   const refresh = useCallback(() => {
@@ -144,47 +229,88 @@ export default function ProductivityHub() {
   // ── Tasks ──────────────────────────────────────────────
   const handleAddTask = async (e) => {
     e.preventDefault()
-    if (!newTaskText.trim()) return
+    const textToAdd = newTaskText.trim()
+    if (!textToAdd || isAddingTask) return
+    setIsAddingTask(true)
     try {
-      const res = await fetch(`${API}/api/tasks`, {
+      const res = await verifiedFetch(`${API}/api/tasks`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text: newTaskText.trim() })
+        body: JSON.stringify({ text: textToAdd })
       })
       if (!res.ok) throw new Error(`HTTP ${res.status}`)
       setNewTaskText('')
       refresh()
     } catch (err) {
       console.error('Failed to add task', err)
-      flash('error', 'Could not add task.')
+      flash('error', 'Could not add task. Your input was preserved.')
+    } finally {
+      setIsAddingTask(false)
     }
   }
 
-  // Idempotent set-completion (retries can't reverse state like a toggle would).
+  // Idempotent set-completion with rollback on failure
   const setCompleted = async (id, completed) => {
-    setTasks(prev => prev.map(t => t.id === id ? { ...t, completed } : t))
-    try {
-      const res = await fetch(`${API}/api/tasks/${id}/complete`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ completed })
-      })
-      if (!res.ok) throw new Error(`HTTP ${res.status}`)
-    } catch (err) {
-      console.error('Failed to update task', err)
-      fetchTasks()
-    }
+    const key = `complete-task-${id}`
+    if (guardRef.current.isPending(key)) return
+    const prevTasks = tasks
+    markPending(key, true)
+    await guardRef.current.execute({
+      key,
+      optimisticApply: () => {
+        setTasks(prev => prev.map(t => t.id === id ? { ...t, completed } : t))
+      },
+      mutationFn: async () => {
+        const res = await verifiedFetch(`${API}/api/tasks/${id}/complete`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ completed })
+        })
+        if (!res.ok) throw new Error(`HTTP ${res.status}`)
+        return res.json()
+      },
+      onSuccess: () => {
+        markPending(key, false)
+      },
+      rollback: () => {
+        setTasks(prevTasks)
+      },
+      onError: (err) => {
+        markPending(key, false)
+        console.error('Failed to update task', err)
+        flash('error', 'Failed to update task completion. State reverted.')
+      },
+    })
   }
 
+  // Honest deletion: checks response and rolls back on failure
   const deleteTask = async (id) => {
-    setTasks(prev => prev.filter(t => t.id !== id))
-    try {
-      await fetch(`${API}/api/tasks/${id}`, { method: 'DELETE' })
-      fetchHub()
-    } catch (err) {
-      console.error('Failed to delete task', err)
-      fetchTasks()
-    }
+    const key = `delete-task-${id}`
+    if (guardRef.current.isPending(key)) return
+    const prevTasks = tasks
+    markPending(key, true)
+    await guardRef.current.execute({
+      key,
+      optimisticApply: () => {
+        setTasks(prev => prev.filter(t => t.id !== id))
+      },
+      mutationFn: async () => {
+        const res = await verifiedFetch(`${API}/api/tasks/${id}`, { method: 'DELETE' })
+        if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      },
+      onSuccess: () => {
+        markPending(key, false)
+        fetchHub()
+      },
+      rollback: () => {
+        setTasks(prevTasks)
+      },
+      onError: (err) => {
+        markPending(key, false)
+        console.error('Failed to delete task', err)
+        flash('error', 'Failed to delete task. Database state preserved.')
+      },
+    })
   }
 
   // ── Timers ─────────────────────────────────────────────
@@ -192,8 +318,10 @@ export default function ProductivityHub() {
     e.preventDefault()
     const mins = parseInt(timerMinutes, 10)
     if (!mins || mins < 1) { flash('error', 'Enter a timer length in minutes.'); return }
+    if (isStartingTimer) return
+    setIsStartingTimer(true)
     try {
-      const res = await fetch(`${API}/api/timers`, {
+      const res = await verifiedFetch(`${API}/api/timers`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ duration_seconds: mins * 60, label: `${mins}m timer` })
@@ -203,17 +331,25 @@ export default function ProductivityHub() {
       refresh()
     } catch (err) {
       console.error('Failed to start timer', err)
-      flash('error', 'Could not start timer.')
+      flash('error', 'Could not start timer. Input preserved.')
+    } finally {
+      setIsStartingTimer(false)
     }
   }
 
   const cancelTimer = async (id) => {
+    const key = `cancel-timer-${id}`
+    if (guardRef.current.isPending(key)) return
+    markPending(key, true)
     try {
-      await fetch(`${API}/api/timers/${id}`, { method: 'DELETE' })
+      const res = await verifiedFetch(`${API}/api/timers/${id}`, { method: 'DELETE' })
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
       refresh()
     } catch (err) {
       console.error('Failed to cancel timer', err)
-      flash('error', 'Could not cancel timer.')
+      flash('error', 'Could not cancel timer. Server state preserved.')
+    } finally {
+      markPending(key, false)
     }
   }
 
@@ -224,9 +360,11 @@ export default function ProductivityHub() {
       flash('error', 'Reminder needs both a note and a date/time.')
       return
     }
+    if (isAddingReminder) return
+    setIsAddingReminder(true)
     const dueIso = new Date(reminderWhen).toISOString()
     try {
-      const res = await fetch(`${API}/api/reminders`, {
+      const res = await verifiedFetch(`${API}/api/reminders`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ text: reminderText.trim(), due_utc: dueIso })
@@ -242,13 +380,18 @@ export default function ProductivityHub() {
       refresh()
     } catch (err) {
       console.error('Failed to create reminder', err)
-      flash('error', 'Could not create reminder.')
+      flash('error', 'Could not create reminder. Inputs preserved.')
+    } finally {
+      setIsAddingReminder(false)
     }
   }
 
   const snoozeReminder = async (id) => {
+    const key = `snooze-reminder-${id}`
+    if (guardRef.current.isPending(key)) return
+    markPending(key, true)
     try {
-      const res = await fetch(`${API}/api/reminders/${id}/snooze`, {
+      const res = await verifiedFetch(`${API}/api/reminders/${id}/snooze`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ minutes: 10 })
@@ -259,6 +402,8 @@ export default function ProductivityHub() {
     } catch (err) {
       console.error('Failed to snooze reminder', err)
       flash('error', 'Could not snooze reminder.')
+    } finally {
+      markPending(key, false)
     }
   }
 
@@ -267,8 +412,10 @@ export default function ProductivityHub() {
     e.preventDefault()
     const mins = parseInt(focusMinutes, 10)
     if (!mins || mins < 1) { flash('error', 'Enter a focus length in minutes.'); return }
+    if (isStartingFocus) return
+    setIsStartingFocus(true)
     try {
-      const res = await fetch(`${API}/api/focus/start`, {
+      const res = await verifiedFetch(`${API}/api/focus/start`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ duration_seconds: mins * 60, objective: focusObjective.trim() })
@@ -283,13 +430,17 @@ export default function ProductivityHub() {
       refresh()
     } catch (err) {
       console.error('Failed to start focus', err)
-      flash('error', 'Could not start focus session.')
+      flash('error', 'Could not start focus session. Objective preserved.')
+    } finally {
+      setIsStartingFocus(false)
     }
   }
 
   const endFocus = async () => {
+    if (isEndingFocus) return
+    setIsEndingFocus(true)
     try {
-      const res = await fetch(`${API}/api/focus/end`, {
+      const res = await verifiedFetch(`${API}/api/focus/end`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ note: '' })
@@ -300,6 +451,8 @@ export default function ProductivityHub() {
     } catch (err) {
       console.error('Failed to end focus', err)
       flash('error', 'Could not end focus session.')
+    } finally {
+      setIsEndingFocus(false)
     }
   }
 
@@ -307,8 +460,10 @@ export default function ProductivityHub() {
   const registerProject = async (e) => {
     e.preventDefault()
     if (!newProject.name.trim()) { flash('error', 'Give the project a name.'); return }
+    if (isRegisteringProject) return
+    setIsRegisteringProject(true)
     try {
-      const res = await fetch(`${API}/api/workspaces`, {
+      const res = await verifiedFetch(`${API}/api/workspaces`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -328,13 +483,15 @@ export default function ProductivityHub() {
       refresh()
     } catch (err) {
       console.error('Failed to register project', err)
-      flash('error', 'Could not register project.')
+      flash('error', 'Could not register project. Form inputs preserved.')
+    } finally {
+      setIsRegisteringProject(false)
     }
   }
 
   const resumeProject = async (id) => {
     try {
-      const res = await fetch(`${API}/api/workspaces/${id}/resume`, { method: 'POST' })
+      const res = await verifiedFetch(`${API}/api/workspaces/${id}/resume`, { method: 'POST' })
       if (!res.ok) throw new Error(`HTTP ${res.status}`)
       setResumed(await res.json())
     } catch (err) {
@@ -345,7 +502,7 @@ export default function ProductivityHub() {
 
   const setProjectNextAction = async (id, nextAction) => {
     try {
-      const res = await fetch(`${API}/api/workspaces/${id}`, {
+      const res = await verifiedFetch(`${API}/api/workspaces/${id}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ next_action: nextAction, idempotency_key: idemKey('next') })
@@ -367,22 +524,21 @@ export default function ProductivityHub() {
       setDraft({ ...d, idempotency_key: idemKey('session') })
     } catch (err) {
       console.error('Failed to build session draft', err)
-      flash('error', 'Could not build today\'s summary.')
+      flash('error', "Could not build today's summary.")
     }
   }
 
   const saveSessionNote = async () => {
-    if (!draft) return
+    if (!draft || isSavingSessionNote) return
+    setIsSavingSessionNote(true)
     try {
-      const res = await fetch(`${API}/api/session/notes`, {
+      const res = await verifiedFetch(`${API}/api/session/notes`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           outcome: draft.outcome || undefined,
           blocker: draft.blocker || undefined,
           next_action: draft.next_action || undefined,
-          // Attach to the project the user just resumed (their own action, not a
-          // model guess). Omitted when nothing was resumed → a day-level note.
           workspace_id: resumed?.workspace?.id || undefined,
           idempotency_key: draft.idempotency_key,
         })
@@ -398,7 +554,9 @@ export default function ProductivityHub() {
       refresh()
     } catch (err) {
       console.error('Failed to save session note', err)
-      flash('error', 'Could not save the session note.')
+      flash('error', 'Could not save the session note. Your draft was preserved.')
+    } finally {
+      setIsSavingSessionNote(false)
     }
   }
 
@@ -406,15 +564,17 @@ export default function ProductivityHub() {
   const addCoursework = async (e) => {
     e.preventDefault()
     if (!newCw.title.trim()) { flash('error', 'Give the assignment or exam a name.'); return }
+    if (isAddingCw) return
+    setIsAddingCw(true)
     try {
-      const res = await fetch(`${API}/api/coursework`, {
+      const res = await verifiedFetch(`${API}/api/coursework`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           title: newCw.title.trim(),
           kind: newCw.kind,
           workspace_id: newCw.workspace_id ? Number(newCw.workspace_id) : undefined,
-          due: newCw.due.trim() || undefined,          // phrase; backend validates tz + past dates
+          due: newCw.due.trim() || undefined,
           effort_text: newCw.effort_text.trim() || undefined,
           idempotency_key: idemKey('cw'),
         })
@@ -431,21 +591,27 @@ export default function ProductivityHub() {
       refresh()
     } catch (err) {
       console.error('Failed to add coursework', err)
-      flash('error', 'Could not log that item.')
+      flash('error', 'Could not log that item. Form inputs preserved.')
+    } finally {
+      setIsAddingCw(false)
     }
   }
 
   const completeCoursework = async (id) => {
+    const key = `complete-cw-${id}`
+    if (guardRef.current.isPending(key)) return
+    markPending(key, true)
     try {
-      const res = await fetch(`${API}/api/coursework/${id}/complete`, { method: 'POST' })
+      const res = await verifiedFetch(`${API}/api/coursework/${id}/complete`, { method: 'POST' })
       if (!res.ok) throw new Error(`HTTP ${res.status}`)
-      // Don't leave a stale "Do this: …" card pointing at finished work.
       if (study?.suggestion?.id === id) setStudy(null)
       flash('info', 'Marked done.')
       refresh()
     } catch (err) {
       console.error('Failed to complete coursework', err)
       flash('error', 'Could not mark that item done.')
+    } finally {
+      markPending(key, false)
     }
   }
 
@@ -491,7 +657,7 @@ export default function ProductivityHub() {
     setIsSavingNote(true)
     saveTimeoutRef.current = setTimeout(async () => {
       try {
-        const res = await fetch(`${API}/api/notes`, {
+        const res = await verifiedFetch(`${API}/api/notes`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ text })
@@ -515,20 +681,36 @@ export default function ProductivityHub() {
   const activeFocus = hub.active_focus
 
   return (
-    <div className="flex flex-col w-full max-w-3xl mx-auto rounded-lg border border-current/20 bg-black/10 backdrop-blur-sm overflow-hidden shadow-inner mt-6">
+    <div className="flex flex-col w-full mx-auto rounded-lg border border-current/20 bg-black/10 backdrop-blur-sm overflow-hidden shadow-inner mt-0">
       {/* Header / Strip */}
       <div className="flex items-center justify-between p-3 border-b border-current/20 bg-black/20">
-        <div className="flex items-center gap-4">
+        <div className="flex items-center gap-3">
           <div className="flex items-center gap-2">
             <ListTodo size={16} className="text-[var(--accent)]" />
             <span className="text-sm font-semibold tracking-wider">PRODUCTIVITY HUB</span>
           </div>
           <div className="hidden sm:block h-4 w-px bg-current opacity-20"></div>
           <span className="hidden sm:block text-xs font-bold text-[var(--accent)]">{openTasksCount} Open Tasks</span>
+          {(freshness.tasks.isStale || freshness.hub.isStale || freshness.today.isStale || freshness.projects.isStale || freshness.coursework.isStale) && (
+            <span className="text-[10px] bg-amber-500/20 text-amber-300 border border-amber-500/30 px-1.5 py-0.5 rounded tracking-wide font-medium">
+              Stale (cached)
+            </span>
+          )}
         </div>
-        <div className="flex items-center gap-2 opacity-60">
-          <Calendar size={14} />
-          <span className="text-[10px] sm:text-xs uppercase tracking-wider truncate">{hub.timezone || 'Local time'}</span>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={refresh}
+            disabled={freshness.tasks.loading || freshness.hub.loading}
+            className="p-1 text-xs opacity-70 hover:opacity-100 disabled:opacity-30 rounded hover:bg-white/10 transition-colors"
+            title="Refresh hub data"
+            aria-label="Refresh hub data"
+          >
+            <RefreshCw size={13} className={freshness.tasks.loading || freshness.hub.loading ? 'animate-spin' : ''} />
+          </button>
+          <div className="flex items-center gap-2 opacity-60">
+            <Calendar size={14} />
+            <span className="text-[10px] sm:text-xs uppercase tracking-wider truncate">{hub.timezone || 'Local time'}</span>
+          </div>
         </div>
       </div>
 
@@ -569,21 +751,30 @@ export default function ProductivityHub() {
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 p-3 border-b border-current/20">
         {/* Timers */}
         <div className="bg-black/20 rounded-lg border border-current/10 p-3 flex flex-col gap-2">
-          <h4 className="text-[10px] uppercase tracking-widest opacity-70 flex items-center gap-2">
-            <TimerIcon size={12} /> Timers
+          <h4 className="text-[10px] uppercase tracking-widest opacity-70 flex items-center justify-between">
+            <span className="flex items-center gap-2"><TimerIcon size={12} /> Timers</span>
+            {freshness.hub.isStale && <span className="text-[9px] text-amber-400 font-normal">stale</span>}
           </h4>
           {activeTimers.length === 0 && <p className="text-xs opacity-40 italic">No active timers.</p>}
-          {activeTimers.map(t => (
-            <div key={t.id} className="flex items-center justify-between gap-2 text-xs">
-              <div className="min-w-0">
-                <div className="truncate font-semibold">{t.label || 'Timer'}</div>
-                <div className="text-[var(--accent)] tabular-nums">{fmtCountdown(t.end_utc, nowMs)}</div>
+          {activeTimers.map(t => {
+            const isCancelling = pendingKeys.has('cancel-timer-' + t.id)
+            return (
+              <div key={t.id} className="flex items-center justify-between gap-2 text-xs">
+                <div className="min-w-0">
+                  <div className="truncate font-semibold">{t.label || 'Timer'}</div>
+                  <div className="text-[var(--accent)] tabular-nums">{fmtCountdown(t.end_utc, nowMs)}</div>
+                </div>
+                <button
+                  onClick={() => cancelTimer(t.id)}
+                  disabled={isCancelling}
+                  className="text-red-400 hover:text-red-300 disabled:opacity-40 shrink-0 p-0.5"
+                  title="Cancel timer"
+                >
+                  <X size={14} className={isCancelling ? 'animate-spin' : ''} />
+                </button>
               </div>
-              <button onClick={() => cancelTimer(t.id)} className="text-red-400 hover:text-red-300 shrink-0" title="Cancel timer">
-                <X size={14} />
-              </button>
-            </div>
-          ))}
+            )
+          })}
           <form onSubmit={addTimer} className="flex gap-1 mt-auto">
             <input
               type="number" min="1" max="1440" value={timerMinutes}
@@ -591,7 +782,12 @@ export default function ProductivityHub() {
               className="w-full bg-black/30 border border-current/20 text-xs p-1.5 outline-none font-inherit"
               placeholder="min"
             />
-            <button type="submit" className="bg-[var(--accent)]/20 text-[var(--accent)] px-2 hover:bg-[var(--accent)]/40 border border-[var(--accent)]/30 shrink-0" title="Start timer">
+            <button
+              type="submit"
+              disabled={isStartingTimer}
+              className="bg-[var(--accent)]/20 text-[var(--accent)] px-2 hover:bg-[var(--accent)]/40 disabled:opacity-40 border border-[var(--accent)]/30 shrink-0"
+              title="Start timer"
+            >
               <Plus size={14} />
             </button>
           </form>
@@ -599,15 +795,20 @@ export default function ProductivityHub() {
 
         {/* Next reminder */}
         <div className="bg-black/20 rounded-lg border border-current/10 p-3 flex flex-col gap-2">
-          <h4 className="text-[10px] uppercase tracking-widest opacity-70 flex items-center gap-2">
-            <BellRing size={12} /> Next Reminder
+          <h4 className="text-[10px] uppercase tracking-widest opacity-70 flex items-center justify-between">
+            <span className="flex items-center gap-2"><BellRing size={12} /> Next Reminder</span>
+            {freshness.hub.isStale && <span className="text-[9px] text-amber-400 font-normal">stale</span>}
           </h4>
           {nextReminder ? (
             <div className="text-xs">
               <div className="truncate font-semibold">{nextReminder.text}</div>
               <div className="opacity-70">{fmtLocal(nextReminder.due_utc)}</div>
               <div className="text-[var(--accent)] tabular-nums">{fmtCountdown(nextReminder.due_utc, nowMs)}</div>
-              <button onClick={() => snoozeReminder(nextReminder.id)} className="mt-1 text-[10px] underline opacity-80 hover:opacity-100">
+              <button
+                onClick={() => snoozeReminder(nextReminder.id)}
+                disabled={pendingKeys.has('snooze-' + nextReminder.id)}
+                className="mt-1 text-[10px] underline opacity-80 hover:opacity-100 disabled:opacity-40"
+              >
                 Snooze 10 min
               </button>
             </div>
@@ -627,7 +828,12 @@ export default function ProductivityHub() {
                 onChange={(e) => setReminderWhen(e.target.value)}
                 className="w-full bg-black/30 border border-current/20 text-[10px] p-1 outline-none font-inherit"
               />
-              <button type="submit" className="bg-[var(--accent)]/20 text-[var(--accent)] px-2 hover:bg-[var(--accent)]/40 border border-[var(--accent)]/30 shrink-0" title="Add reminder">
+              <button
+                type="submit"
+                disabled={isAddingReminder}
+                className="bg-[var(--accent)]/20 text-[var(--accent)] px-2 hover:bg-[var(--accent)]/40 disabled:opacity-40 border border-[var(--accent)]/30 shrink-0"
+                title="Add reminder"
+              >
                 <Plus size={14} />
               </button>
             </div>
@@ -636,14 +842,19 @@ export default function ProductivityHub() {
 
         {/* Focus */}
         <div className="bg-black/20 rounded-lg border border-current/10 p-3 flex flex-col gap-2">
-          <h4 className="text-[10px] uppercase tracking-widest opacity-70 flex items-center gap-2">
-            <Target size={12} /> Focus
+          <h4 className="text-[10px] uppercase tracking-widest opacity-70 flex items-center justify-between">
+            <span className="flex items-center gap-2"><Target size={12} /> Focus</span>
+            {freshness.hub.isStale && <span className="text-[9px] text-amber-400 font-normal">stale</span>}
           </h4>
           {activeFocus ? (
             <div className="text-xs">
               <div className="truncate font-semibold">{activeFocus.objective || 'Session'}</div>
               <div className="text-[var(--accent)] tabular-nums">{fmtCountdown(activeFocus.planned_end_utc, nowMs)}</div>
-              <button onClick={endFocus} className="mt-1 flex items-center gap-1 text-[10px] text-red-400 hover:text-red-300">
+              <button
+                onClick={endFocus}
+                disabled={isEndingFocus}
+                className="mt-1 flex items-center gap-1 text-[10px] text-red-400 hover:text-red-300 disabled:opacity-40"
+              >
                 <Square size={10} /> End session
               </button>
             </div>
@@ -665,7 +876,12 @@ export default function ProductivityHub() {
                   className="w-full bg-black/30 border border-current/20 text-xs p-1.5 outline-none font-inherit"
                   placeholder="min"
                 />
-                <button type="submit" className="bg-[var(--accent)]/20 text-[var(--accent)] px-2 hover:bg-[var(--accent)]/40 border border-[var(--accent)]/30 shrink-0" title="Start focus session">
+                <button
+                  type="submit"
+                  disabled={isStartingFocus}
+                  className="bg-[var(--accent)]/20 text-[var(--accent)] px-2 hover:bg-[var(--accent)]/40 disabled:opacity-40 border border-[var(--accent)]/30 shrink-0"
+                  title="Start focus session"
+                >
                   <Play size={14} />
                 </button>
               </div>
@@ -679,6 +895,9 @@ export default function ProductivityHub() {
         <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
           <h4 className="text-[10px] uppercase tracking-widest opacity-70 flex items-center gap-2">
             <Rocket size={12} className="text-[var(--accent)]" /> Today &amp; Projects
+            {(freshness.today.isStale || freshness.projects.isStale) && (
+              <span className="text-[9px] text-amber-400 font-normal">stale</span>
+            )}
           </h4>
           <button
             onClick={openEndSession}
@@ -745,8 +964,13 @@ export default function ProductivityHub() {
             className="flex-1 min-w-[120px] bg-black/30 border border-current/20 text-xs p-1.5 outline-none font-inherit"
             placeholder="First next action (optional)" aria-label="First next action"
           />
-          <button type="submit" title="Register project" aria-label="Register project"
-            className="bg-[var(--accent)]/20 text-[var(--accent)] px-2 hover:bg-[var(--accent)]/40 border border-[var(--accent)]/30 shrink-0">
+          <button
+            type="submit"
+            disabled={isRegisteringProject}
+            title="Register project"
+            aria-label="Register project"
+            className="bg-[var(--accent)]/20 text-[var(--accent)] px-2 hover:bg-[var(--accent)]/40 disabled:opacity-40 border border-[var(--accent)]/30 shrink-0"
+          >
             <FolderPlus size={14} />
           </button>
         </form>
@@ -813,8 +1037,11 @@ export default function ProductivityHub() {
               placeholder="Next action for next time" aria-label="Session next action"
             />
             <div className="flex gap-2">
-              <button onClick={saveSessionNote}
-                className="bg-[var(--accent)]/20 text-[var(--accent)] px-2 py-1 rounded border border-[var(--accent)]/30 hover:bg-[var(--accent)]/40">
+              <button
+                onClick={saveSessionNote}
+                disabled={isSavingSessionNote}
+                className="bg-[var(--accent)]/20 text-[var(--accent)] px-2 py-1 rounded border border-[var(--accent)]/30 hover:bg-[var(--accent)]/40 disabled:opacity-40"
+              >
                 Save session note
               </button>
               <button onClick={() => setDraft(null)} className="px-2 py-1 rounded border border-current/20 hover:opacity-80">
@@ -831,6 +1058,7 @@ export default function ProductivityHub() {
         <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
           <h4 className="text-[10px] uppercase tracking-widest opacity-70 flex items-center gap-2">
             <GraduationCap size={12} className="text-[var(--accent)]" /> Study plan
+            {freshness.coursework.isStale && <span className="text-[9px] text-amber-400 font-normal">stale</span>}
           </h4>
           <form className="flex items-center gap-1 text-xs"
             onSubmit={(e) => { e.preventDefault(); askStudy(studyMinutes) }}>
@@ -867,8 +1095,11 @@ export default function ProductivityHub() {
                     className="bg-[var(--accent)]/20 text-[var(--accent)] px-2 py-0.5 rounded border border-[var(--accent)]/30 hover:bg-[var(--accent)]/40">
                     Use in Focus
                   </button>
-                  <button onClick={() => completeCoursework(study.suggestion.id)}
-                    className="px-2 py-0.5 rounded border border-current/20 hover:opacity-80">
+                  <button
+                    onClick={() => completeCoursework(study.suggestion.id)}
+                    disabled={pendingKeys.has('complete-cw-' + study.suggestion.id)}
+                    className="px-2 py-0.5 rounded border border-current/20 hover:opacity-80 disabled:opacity-40"
+                  >
                     It&rsquo;s already done
                   </button>
                 </div>
@@ -923,8 +1154,13 @@ export default function ProductivityHub() {
             className="w-[130px] bg-black/30 border border-current/20 text-xs p-1.5 outline-none font-inherit"
             placeholder="Effort (e.g. 90 min)" aria-label="Estimated effort"
           />
-          <button type="submit" title="Log coursework" aria-label="Log coursework"
-            className="bg-[var(--accent)]/20 text-[var(--accent)] px-2 hover:bg-[var(--accent)]/40 border border-[var(--accent)]/30 shrink-0">
+          <button
+            type="submit"
+            disabled={isAddingCw}
+            title="Log coursework"
+            aria-label="Log coursework"
+            className="bg-[var(--accent)]/20 text-[var(--accent)] px-2 hover:bg-[var(--accent)]/40 disabled:opacity-40 border border-[var(--accent)]/30 shrink-0"
+          >
             <Plus size={14} />
           </button>
         </form>
@@ -933,20 +1169,28 @@ export default function ProductivityHub() {
           <div className="opacity-40 text-xs italic">Nothing open. Log an assignment, or say &ldquo;add assignment &lt;title&gt; due friday about 90 minutes&rdquo;.</div>
         ) : (
           <div className="space-y-1">
-            {coursework.slice(0, 8).map(c => (
-              <div key={c.id} className="flex items-center gap-2 text-xs bg-black/25 border border-current/10 rounded px-2 py-1">
-                <button onClick={() => completeCoursework(c.id)} title="Mark done" aria-label={`Mark ${c.title} done`}
-                  className="shrink-0 opacity-70 hover:opacity-100">
-                  <Circle size={12} />
-                </button>
-                <GraduationCap size={11} className="text-[var(--accent)] shrink-0" />
-                <span className="truncate">{c.kind}: {c.title}</span>
-                <span className="opacity-50 shrink-0">
-                  {c.due_utc ? `· due ${fmtLocal(c.due_utc)}` : '· no due date'}
-                  {c.effort_minutes ? ` · ~${c.effort_minutes} min` : ''}
-                </span>
-              </div>
-            ))}
+            {coursework.slice(0, 8).map(c => {
+              const isCwPending = pendingKeys.has('complete-cw-' + c.id)
+              return (
+                <div key={c.id} className="flex items-center gap-2 text-xs bg-black/25 border border-current/10 rounded px-2 py-1">
+                  <button
+                    onClick={() => completeCoursework(c.id)}
+                    disabled={isCwPending}
+                    title="Mark done"
+                    aria-label={`Mark ${c.title} done`}
+                    className="shrink-0 opacity-70 hover:opacity-100 disabled:opacity-40"
+                  >
+                    <Circle size={12} className={isCwPending ? 'animate-spin' : ''} />
+                  </button>
+                  <GraduationCap size={11} className="text-[var(--accent)] shrink-0" />
+                  <span className="truncate">{c.kind}: {c.title}</span>
+                  <span className="opacity-50 shrink-0">
+                    {c.due_utc ? `· due ${fmtLocal(c.due_utc)}` : '· no due date'}
+                    {c.effort_minutes ? ` · ~${c.effort_minutes} min` : ''}
+                  </span>
+                </div>
+              )
+            })}
           </div>
         )}
       </div>
@@ -957,8 +1201,23 @@ export default function ProductivityHub() {
 
         {/* Tasks Column */}
         <div className="flex flex-col min-h-[280px] bg-black/20 rounded-lg border border-current/10 p-3">
-          <h3 className="text-xs uppercase tracking-widest opacity-70 mb-3 flex items-center gap-2 shrink-0">
-            <CheckCircle2 size={14} /> Task Matrix
+          <h3 className="text-xs uppercase tracking-widest opacity-70 mb-3 flex items-center justify-between shrink-0">
+            <span className="flex items-center gap-2"><CheckCircle2 size={14} /> Task Matrix</span>
+            <div className="flex items-center gap-1.5">
+              <div className="flex items-center bg-black/40 border border-current/15 rounded p-0.5 text-[10px]">
+                {['all', 'open', 'completed'].map(f => (
+                  <button
+                    key={f}
+                    onClick={() => setTaskFilter(f)}
+                    className={`px-1.5 py-0.5 rounded transition-colors ${taskFilter === f ? 'bg-[var(--accent)] text-black font-semibold' : 'opacity-60 hover:opacity-100'}`}
+                    aria-label={`Show ${f} tasks`}
+                  >
+                    {f === 'all' ? `All (${tasks.length})` : f === 'open' ? `Open (${openTasksCount})` : `Done (${tasks.length - openTasksCount})`}
+                  </button>
+                ))}
+              </div>
+              {freshness.tasks.isStale && <span className="text-[9px] text-amber-400 font-normal">stale</span>}
+            </div>
           </h3>
 
           <form onSubmit={handleAddTask} className="flex gap-2 mb-3 shrink-0">
@@ -969,35 +1228,55 @@ export default function ProductivityHub() {
               onChange={(e) => setNewTaskText(e.target.value)}
               className="flex-1 bg-black/30 border border-current/20 text-sm p-2 outline-none font-inherit"
             />
-            <button type="submit" className="bg-[var(--accent)]/20 text-[var(--accent)] p-2 hover:bg-[var(--accent)]/40 transition-colors border border-[var(--accent)]/30">
+            <button
+              type="submit"
+              disabled={isAddingTask}
+              className="bg-[var(--accent)]/20 text-[var(--accent)] p-2 hover:bg-[var(--accent)]/40 disabled:opacity-40 transition-colors border border-[var(--accent)]/30"
+            >
               <Plus size={18} />
             </button>
           </form>
 
           <div className="flex-1 overflow-y-auto max-h-[360px] min-h-[120px] space-y-2 custom-scrollbar pr-1">
-            {tasks.length === 0 && (
-              <div className="opacity-30 text-xs italic text-center mt-4">No tasks found.</div>
-            )}
-            {tasks.map(task => (
-              <div key={task.id} className="group flex items-start gap-2 p-2 bg-black/30 border border-current/10 hover:border-[var(--accent)] transition-colors">
-                <button onClick={() => setCompleted(task.id, !task.completed)} className="text-[var(--accent)] shrink-0 mt-0.5" title={task.completed ? 'Mark as not done' : 'Mark as done'}>
-                  {task.completed ? <CheckCircle2 size={16} /> : <Circle size={16} />}
-                </button>
-                <div className="flex-1 min-w-0">
-                  <span className={`block text-sm break-words ${task.completed ? 'line-through opacity-40' : ''}`}>
-                    {task.text}
-                  </span>
-                  {task.deadline_utc && (
-                    <span className="block text-[10px] opacity-60 mt-0.5 flex items-center gap-1">
-                      <Calendar size={10} /> Due {fmtLocal(task.deadline_utc)}
-                    </span>
-                  )}
-                </div>
-                <button onClick={() => deleteTask(task.id)} aria-label={`Delete task ${task.id}: ${task.text}`} className="opacity-0 group-hover:opacity-100 focus:opacity-100 group-focus-within:opacity-100 text-red-500 hover:text-red-400 focus-visible:text-red-400 transition-opacity shrink-0 mt-0.5">
-                  <Trash2 size={16} />
-                </button>
+            {tasks.filter(t => taskFilter === 'open' ? !t.completed : taskFilter === 'completed' ? t.completed : true).length === 0 && (
+              <div className="opacity-40 text-xs italic text-center py-6">
+                {taskFilter === 'completed' ? 'No completed tasks yet.' : taskFilter === 'open' ? 'All caught up! No open tasks.' : 'No tasks found. Add one above!'}
               </div>
-            ))}
+            )}
+            {tasks.filter(t => taskFilter === 'open' ? !t.completed : taskFilter === 'completed' ? t.completed : true).map(task => {
+              const isTogglePending = pendingKeys.has('complete-task-' + task.id)
+              const isDeletePending = pendingKeys.has('delete-task-' + task.id)
+              return (
+                <div key={task.id} className="group flex items-start gap-2 p-2 bg-black/30 border border-current/10 hover:border-[var(--accent)] transition-colors">
+                  <button
+                    onClick={() => setCompleted(task.id, !task.completed)}
+                    disabled={isTogglePending}
+                    className="text-[var(--accent)] shrink-0 mt-0.5 disabled:opacity-40"
+                    title={task.completed ? 'Mark as not done' : 'Mark as done'}
+                  >
+                    {task.completed ? <CheckCircle2 size={16} /> : <Circle size={16} className={isTogglePending ? 'animate-spin' : ''} />}
+                  </button>
+                  <div className="flex-1 min-w-0">
+                    <span className={`block text-sm break-words ${task.completed ? 'line-through opacity-40' : ''}`}>
+                      {task.text}
+                    </span>
+                    {task.deadline_utc && (
+                      <span className="block text-[10px] opacity-60 mt-0.5 flex items-center gap-1">
+                        <Calendar size={10} /> Due {fmtLocal(task.deadline_utc)}
+                      </span>
+                    )}
+                  </div>
+                  <button
+                    onClick={() => deleteTask(task.id)}
+                    disabled={isDeletePending}
+                    aria-label={`Delete task ${task.id}: ${task.text}`}
+                    className="opacity-0 group-hover:opacity-100 focus:opacity-100 group-focus-within:opacity-100 text-red-500 hover:text-red-400 focus-visible:text-red-400 disabled:opacity-40 transition-opacity shrink-0 mt-0.5"
+                  >
+                    <Trash2 size={16} className={isDeletePending ? 'animate-spin' : ''} />
+                  </button>
+                </div>
+              )
+            })}
           </div>
         </div>
 

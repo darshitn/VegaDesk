@@ -40,5 +40,16 @@ contextBridge.exposeInMainWorld('electronAPI', {
     };
   },
   setAutoLaunch: (enabled) => ipcRenderer.send('set-auto-launch', enabled),
-  getAutoLaunch: () => ipcRenderer.invoke('get-auto-launch')
+  getAutoLaunch: () => ipcRenderer.invoke('get-auto-launch'),
+  showNotification: (options) => ipcRenderer.invoke('show-notification', options),
+  isNotificationSupported: () => ipcRenderer.invoke('is-notification-supported'),
+  onNotificationClicked: (callback) => {
+    const listener = (event, value) => callback(value);
+    ipcRenderer.on('notification-clicked', listener);
+    return () => {
+      ipcRenderer.removeListener('notification-clicked', listener);
+    };
+  },
+  getProfileInfo: () => ipcRenderer.sendSync('get-profile-sync'),
+  getProfileInfoAsync: () => ipcRenderer.invoke('get-profile-info')
 })

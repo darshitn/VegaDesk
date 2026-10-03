@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from 'react'
 import { Cloud, Newspaper, Bitcoin, AlertTriangle, TrendingUp, TrendingDown, ExternalLink, Activity } from 'lucide-react'
 import AIRadarPanel from './AIRadarPanel'
+import { getApiBase } from '../lib/apiConfig'
 
 export default function LiveFeeds({ city, cryptoCoins }) {
   const [weather, setWeather] = useState(null)
@@ -14,7 +15,7 @@ export default function LiveFeeds({ city, cryptoCoins }) {
   const fetchFeeds = useCallback(async () => {
     // Weather
     try {
-      const wRes = await fetch(`http://localhost:8000/api/feeds/weather?city=${encodeURIComponent(city)}`, { signal: AbortSignal.timeout(10000) })
+      const wRes = await fetch(`${getApiBase()}/api/feeds/weather?city=${encodeURIComponent(city)}`, { signal: AbortSignal.timeout(10000) })
       const wData = await wRes.json()
       if (wData.error) throw new Error(wData.error)
       setWeather(wData)
@@ -25,7 +26,7 @@ export default function LiveFeeds({ city, cryptoCoins }) {
 
     // Headlines
     try {
-      const hRes = await fetch(`http://localhost:8000/api/feeds/headlines`, { signal: AbortSignal.timeout(10000) })
+      const hRes = await fetch(`${getApiBase()}/api/feeds/headlines`, { signal: AbortSignal.timeout(10000) })
       const hData = await hRes.json()
       if (hData.error) throw new Error(hData.error)
       if (!Array.isArray(hData)) throw new Error('Invalid headlines format')
@@ -38,7 +39,7 @@ export default function LiveFeeds({ city, cryptoCoins }) {
     // Crypto
     try {
       const coinsParam = cryptoCoins?.trim() ? cryptoCoins.trim() : 'bitcoin,ethereum'
-      const cRes = await fetch(`http://localhost:8000/api/feeds/crypto?coins=${encodeURIComponent(coinsParam)}`, { signal: AbortSignal.timeout(10000) })
+      const cRes = await fetch(`${getApiBase()}/api/feeds/crypto?coins=${encodeURIComponent(coinsParam)}`, { signal: AbortSignal.timeout(10000) })
       const cData = await cRes.json()
       if (cData.error) throw new Error(cData.error)
       setCrypto(cData)

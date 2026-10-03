@@ -1,7 +1,8 @@
 import { useState, useEffect, useCallback } from 'react'
 import { Radar, RefreshCw, ExternalLink, AlertTriangle, CheckCircle2, HelpCircle, Clock } from 'lucide-react'
+import { getApiBase, verifiedFetch } from '../lib/apiConfig'
 
-const API = 'http://localhost:8000'
+const API = getApiBase()
 
 const CATEGORY_LABEL = {
   local_model: 'Local model',
@@ -82,7 +83,7 @@ export default function AIRadarPanel() {
     if (refreshing) return
     setRefreshing(true)
     try {
-      const res = await fetch(`${API}/api/ai-radar/refresh`, { method: 'POST', signal: AbortSignal.timeout(60000) })
+      const res = await verifiedFetch(`${API}/api/ai-radar/refresh`, { method: 'POST', signal: AbortSignal.timeout(60000) })
       if (!res.ok) throw new Error(`HTTP ${res.status}`)
       const data = await res.json()
       setState(data.state || data)
@@ -96,7 +97,7 @@ export default function AIRadarPanel() {
 
   const markRead = async (id) => {
     try {
-      await fetch(`${API}/api/ai-radar/items/${id}/read`, { method: 'POST', signal: AbortSignal.timeout(10000) })
+      await verifiedFetch(`${API}/api/ai-radar/items/${id}/read`, { method: 'POST', signal: AbortSignal.timeout(10000) })
     } catch { /* non-critical */ }
   }
 

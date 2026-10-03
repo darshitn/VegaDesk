@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
 import { Send, Cpu, Mic, MicOff, Volume2, VolumeX, Loader, Radio, Trash2 } from 'lucide-react'
 import { voiceBannerLabel } from '../lib/voiceState'
+import { getApiBase, verifiedFetch } from '../lib/apiConfig'
 
 // Small execution-mode badge (P1): tells the user whether a reply came from
 // the offline parser, a local model, or the configured cloud model. 'none'
@@ -117,7 +118,7 @@ export default function AIBrain({
 
       const controller = new AbortController()
       const t = setTimeout(() => controller.abort(), 30000)
-      const res = await fetch('http://localhost:8000/api/transcribe', {
+      const res = await verifiedFetch(`${getApiBase()}/api/transcribe`, {
         method: 'POST',
         body: formData,
         signal: controller.signal
@@ -138,8 +139,12 @@ export default function AIBrain({
         onAppendMessage({ role: 'assistant', content: '[TRANSCRIPTION] No speech detected.' })
       }
     } catch (err) {
-      const msg = err.name === 'AbortError' ? 'Transcription timed out.' : err.message
-      onAppendMessage({ role: 'assistant', content: `[TRANSCRIPTION ERROR] Could not reach backend: ${msg}` })
+      const msg = err.name === 'AbortError'
+        ? 'Transcription timed out.'
+        : err?.message?.includes('Mutation blocked')
+          ? err.message
+          : err.message
+      onAppendMessage({ role: 'assistant', content: `[TRANSCRIPTION ERROR] ${msg}` })
     } finally {
       setIsTranscribing(false)
     }
