@@ -1,9 +1,43 @@
-import { app, BrowserWindow, globalShortcut, Tray, Menu, ipcMain, screen, nativeImage, shell, session } from 'electron'
+import { app, BrowserWindow, globalShortcut, Tray, Menu, ipcMain, screen, nativeImage, shell, session, Notification } from 'electron'
 import path from 'node:path'
 import fs from 'node:fs'
+import http from 'node:http'
+import net from 'node:net'
 import { fileURLToPath } from 'node:url'
 import { spawn } from 'node:child_process'
 import AutoLaunch from 'auto-launch'
+
+// ── Profile and Environment Detection ──────────────────────────────────────────
+// Beta acceptance mode is explicitly opt-in via VEGA_PROFILE=beta or --profile=beta
+const isBeta = process.env.VEGA_PROFILE === 'beta' || process.argv.includes('--profile=beta')
+const currentPort = isBeta ? Number(process.env.VEGA_PORT || 8005) : Number(process.env.VEGA_PORT || 8000)
+const runId = process.env.VEGA_RUN_ID || (isBeta ? `beta-${Date.now()}` : 'default')
+
+const betaRoot = process.env.VEGA_PROFILE_ROOT || path.join(app.getPath('appData'), 'Jarvis_Dashboard_Beta')
+
+if (isBeta) {
+  process.env.VEGA_PROFILE = 'beta'
+  process.env.VEGA_PORT = String(currentPort)
+  process.env.VEGA_RUN_ID = runId
+  process.env.VEGA_PROFILE_ROOT = betaRoot
+
+  const betaUserData = path.join(betaRoot, 'userData')
+  const betaDbDir = path.join(betaRoot, 'db')
+  const betaLogsDir = path.join(betaRoot, 'logs')
+  try {
+    fs.mkdirSync(betaUserData, { recursive: true })
+    fs.mkdirSync(betaDbDir, { recursive: true })
+    fs.mkdirSync(betaLogsDir, { recursive: true })
+  } catch (err) {
+    console.error('[BETA SETUP] Failed to create beta directories:', err)
+  }
+  // MUST set userData path BEFORE loadSettings() and BEFORE requestSingleInstanceLock()
+  app.setPath('userData', betaUserData)
+}
+
+if (process.platform === 'win32') {
+  app.setAppUserModelId(isBeta ? 'com.jarvis.vega.beta' : 'com.jarvis.vega')
+}
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const VITE_DEV_SERVER_URL = process.env['VITE_DEV_SERVER_URL']
@@ -117,6 +151,7 @@ function createMainWindow() {
     : null
 
   mainWindow = new BrowserWindow({
+    title: isBeta ? `V.E.G.A. [BETA PROFILE · PORT ${currentPort}]` : 'V.E.G.A.',
     width: savedBoundsBoot ? savedBoundsBoot.width : 1100,
     height: savedBoundsBoot ? savedBoundsBoot.height : 750,
     ...(savedBoundsBoot ? { x: savedBoundsBoot.x, y: savedBoundsBoot.y } : {}),
@@ -196,18 +231,18 @@ function createMainWindow() {
 
   applyWindowThemeConfig(mainWindow, currentTheme)
 
-  // Register shortcut with error handling
-  const shortcutOk = globalShortcut.register('CommandOrControl+Space', () => {
+  // Register shortcut with error handling (scoped to beta to avoid personal profile collision)
+  const shortcutKey = isBeta ? 'CommandOrControl+Alt+Space' : 'CommandOrControl+Space'
+  const shortcutOk = globalShortcut.register(shortcutKey, () => {
     if (!mainWindow || mainWindow.isDestroyed()) return
     console.log('Shortcut pressed. isVisible:', mainWindow.isVisible());
     if (mainWindow.isVisible()) {
       // Notify React to play the exit animation, then hide after it completes
       try { mainWindow.webContents.send('toggle-visibility', false) } catch {}
       setTimeout(() => {
-        if (mainWindow && !mainWindow.isDestroyed()) {
-          console.log('Executing setTimeout hide()');
-          try { mainWindow.hide() } catch {}
-        }
+        if (!mainWindow || mainWindow.isDestroyed()) return
+        console.log('Executing setTimeout hide()');
+        try { mainWindow.hide() } catch {}
       }, 200)
     } else {
       console.log('Executing show() and focus()');
@@ -217,15 +252,14 @@ function createMainWindow() {
       try { mainWindow.focus() } catch {}
       try { mainWindow.webContents.send('toggle-visibility', true) } catch {}
       setTimeout(() => {
-        if (mainWindow && !mainWindow.isDestroyed()) {
-          try { mainWindow.setOpacity(1) } catch {}
-        }
+        if (!mainWindow || mainWindow.isDestroyed()) return
+        try { mainWindow.setOpacity(1) } catch {}
         isJustShown = false
       }, 50)
     }
   })
   if (!shortcutOk) {
-    console.error('Failed to register global shortcut CommandOrControl+Space — may be already in use.')
+    console.warn(`Failed to register global shortcut ${shortcutKey} — may be already in use.`)
   }
 }
 
@@ -241,7 +275,7 @@ function updateWindowsVisibility() {
 
 function setupTray() {
   tray = new Tray(trayIcon)
-  tray.setToolTip('V.E.G.A.')
+  tray.setToolTip(isBeta ? `V.E.G.A. [BETA PROFILE · PORT ${currentPort}]` : 'V.E.G.A.')
   updateTrayMenu()
 }
 
@@ -290,11 +324,45 @@ function switchMode(newMode) {
   }
 }
 
-// Single instance: a second launch would spawn a second backend (port clash)
-// and a second voice client (duplicate wake-word commands).
-const gotTheLock = app.requestSingleInstanceLock()
+function checkPortInUse(port) {
+  return new Promise((resolve) => {
+    const tester = net.createServer()
+      .once('error', (err) => {
+        if (err.code === 'EADDRINUSE') resolve(true)
+        else resolve(false)
+      })
+      .once('listening', () => {
+        tester.once('close', () => resolve(false)).close()
+      })
+      .listen(port, '127.0.0.1')
+  })
+}
+
+function probeHealth(port) {
+  return new Promise((resolve) => {
+    const req = http.get(`http://127.0.0.1:${port}/health`, { timeout: 1500 }, (res) => {
+      let data = ''
+      res.on('data', chunk => { data += chunk })
+      res.on('end', () => {
+        if (res.statusCode !== 200) {
+          return resolve({ ok: false, error: `HTTP ${res.statusCode}` })
+        }
+        try {
+          resolve({ ok: true, data: JSON.parse(data) })
+        } catch {
+          resolve({ ok: false, error: 'malformed_json' })
+        }
+      })
+    })
+    req.on('error', (err) => resolve({ ok: false, error: err.message }))
+    req.on('timeout', () => { req.destroy(); resolve({ ok: false, error: 'timeout' }) })
+  })
+}
+
+// Single instance: scoped to userData directory (isolated between default and beta profiles)
+const gotTheLock = app.requestSingleInstanceLock({ profile: isBeta ? 'beta' : 'default' })
 if (!gotTheLock) {
-  console.log('[VEGA] Another instance is already running — exiting.')
+  console.log(`[VEGA ${isBeta ? 'BETA' : 'DEFAULT'}] Another instance is already running — exiting.`)
   app.quit()
 } else {
   app.on('second-instance', () => {
@@ -313,27 +381,70 @@ if (!gotTheLock) {
   })
 }
 
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
   if (!gotTheLock) return // quit already requested
-  // Set up Auto-Launch
-  jarvisAutoLauncher = new AutoLaunch({
+
+  // Port collision and ownership check
+  const portBusy = await checkPortInUse(currentPort)
+  if (portBusy) {
+    const probe = await probeHealth(currentPort)
+    const expectedProfile = isBeta ? 'beta' : 'default'
+    const profileMatch = probe.ok && probe.data && probe.data.profile === expectedProfile
+    const runIdMatch = !isBeta || (probe.ok && probe.data && probe.data.run_id === runId)
+    const dbReady = probe.ok && probe.data && probe.data.database && probe.data.database.status === 'ready'
+
+    if (!profileMatch || !runIdMatch || !dbReady) {
+      console.error(
+        `[VEGA PORT ERROR] Port ${currentPort} is occupied by an external service, mismatched profile, ` +
+        `or mismatched session (profile=${probe?.data?.profile}, run_id=${probe?.data?.run_id}, ` +
+        `db=${probe?.data?.database?.status}). Refusing to launch to prevent cross-profile data corruption.`
+      )
+      app.quit()
+      return
+    }
+  }
+
+  // Set up Auto-Launch only for normal mode (beta profile NEVER touches OS startup)
+  if (!isBeta) {
+    jarvisAutoLauncher = new AutoLaunch({
       name: 'Vega Dashboard',
       path: app.getPath('exe'),
-  });
+    })
+  }
 
   // Spawn bundled backend if packaged
   if (app.isPackaged) {
-    const backendPath = path.join(process.resourcesPath, 'backend', 'jarvis-backend.exe');
-    try {
-      if (fs.existsSync(backendPath)) {
-        backendProcess = spawn(backendPath, [], { stdio: 'inherit' });
-        backendProcess.on('error', (err) => console.error('Backend spawn error:', err))
-        backendProcess.on('exit', (code) => console.log('Backend exited with code', code))
-      } else {
-        console.error('Bundled backend not found at', backendPath)
+    if (portBusy) {
+      console.log(`[VEGA PACKAGED] Port ${currentPort} already has an active verified backend. Skipping secondary spawn to prevent port collision.`)
+    } else {
+      const backendPath = path.join(process.resourcesPath, 'backend', 'jarvis-backend.exe');
+      const backendDbPath = isBeta
+        ? path.join(betaRoot, 'db', 'jarvis-beta.db')
+        : path.join(app.getPath('userData'), 'jarvis.db')
+
+      const backendEnv = {
+        ...process.env,
+        VEGA_PROFILE: isBeta ? 'beta' : (process.env.VEGA_PROFILE || 'default'),
+        VEGA_PORT: String(currentPort),
+        VEGA_RUN_ID: runId,
+        JARVIS_DB_PATH: backendDbPath,
+        VEGA_PROFILE_ROOT: isBeta ? betaRoot : app.getPath('userData'),
+        VEGA_DISABLE_VOICE: isBeta ? '1' : (process.env.VEGA_DISABLE_VOICE || '0'),
+        VEGA_DISABLE_RADAR: isBeta ? '1' : (process.env.VEGA_DISABLE_RADAR || '0'),
+        LLM_PROVIDER: isBeta ? 'none' : (process.env.LLM_PROVIDER || 'gemini'),
       }
-    } catch (err) {
-      console.error('Failed to spawn backend:', err)
+
+      try {
+        if (fs.existsSync(backendPath)) {
+          backendProcess = spawn(backendPath, [], { env: backendEnv, stdio: 'inherit' });
+          backendProcess.on('error', (err) => console.error('Backend spawn error:', err))
+          backendProcess.on('exit', (code) => console.log('Backend exited with code', code))
+        } else {
+          console.error('Bundled backend not found at', backendPath)
+        }
+      } catch (err) {
+        console.error('Failed to spawn backend:', err)
+      }
     }
   }
 
@@ -343,7 +454,7 @@ app.whenReady().then(() => {
   const activeSession = session.defaultSession
   
   activeSession.setPermissionRequestHandler((webContents, permission, callback) => {
-    if (permission === 'media') {
+    if (permission === 'media' || permission === 'notifications') {
       callback(true)
     } else {
       callback(false)
@@ -351,7 +462,7 @@ app.whenReady().then(() => {
   })
   
   activeSession.setPermissionCheckHandler((webContents, permission, requestingOrigin, details) => {
-    if (permission === 'media') {
+    if (permission === 'media' || permission === 'notifications') {
       return true
     }
     return false
@@ -424,6 +535,7 @@ app.whenReady().then(() => {
   ipcMain.handle('get-maximize-state', () => isMaximizedManual)
 
   ipcMain.on('set-auto-launch', (e, enabled) => {
+    if (isBeta || !jarvisAutoLauncher) return
     if (enabled) {
       jarvisAutoLauncher.enable().catch(() => {});
     } else {
@@ -432,6 +544,7 @@ app.whenReady().then(() => {
   })
 
   ipcMain.handle('get-auto-launch', async () => {
+    if (isBeta || !jarvisAutoLauncher) return false
     try {
       return await jarvisAutoLauncher.isEnabled();
     } catch (e) {
@@ -462,6 +575,79 @@ app.whenReady().then(() => {
 
   ipcMain.handle('get-theme', () => currentTheme)
 
+  ipcMain.on('get-profile-sync', (event) => {
+    event.returnValue = {
+      profile: isBeta ? 'beta' : 'default',
+      port: currentPort,
+      runId,
+      isBeta,
+      betaRoot: isBeta ? betaRoot : null,
+    }
+  })
+
+  ipcMain.handle('get-profile-info', () => ({
+    profile: isBeta ? 'beta' : 'default',
+    port: currentPort,
+    runId,
+    isBeta,
+    betaRoot: isBeta ? betaRoot : null,
+  }))
+
+  ipcMain.handle('show-notification', async (event, options) => {
+    if (!Notification.isSupported()) {
+      return { accepted: false, reason: 'unsupported' }
+    }
+    if (!options || typeof options !== 'object') {
+      return { accepted: false, reason: 'invalid_options' }
+    }
+    try {
+      const title = String(options.title || 'V.E.G.A. Alert').slice(0, 200)
+      const body = String(options.body || '').slice(0, 1000)
+      const notification = new Notification({
+        title,
+        body,
+        icon: trayIcon
+      })
+
+      notification.on('click', () => {
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          isJustShown = true
+          if (mainWindow.isMinimized()) mainWindow.restore()
+          mainWindow.show()
+          mainWindow.focus()
+          mainWindow.webContents.send('toggle-visibility', true)
+          mainWindow.webContents.send('notification-clicked', {
+            id: options.id,
+            kind: options.kind,
+            entity_id: options.entity_id,
+          })
+          setTimeout(() => { isJustShown = false }, 50)
+        }
+      })
+
+      notification.on('failed', (err) => {
+        console.warn('[ELECTRON NOTIFICATION] OS notification failed event:', err)
+      })
+
+      notification.show()
+      // Truthful return: API accepted and shown to OS notification subsystem;
+      // does not claim user-observed Windows rendering.
+      return {
+        accepted: true,
+        channel: 'electron-native',
+        delivery_stage: 'api_accepted',
+        observed_by_user: false
+      }
+    } catch (err) {
+      console.error('[ELECTRON] Failed to show notification:', err)
+      return { accepted: false, error: err?.message || String(err) }
+    }
+  })
+
+  ipcMain.handle('is-notification-supported', () => {
+    return Notification.isSupported()
+  })
+
   updateWindowsVisibility()
 })
 
@@ -479,17 +665,17 @@ app.on('will-quit', () => {
       saveSettings({ windowBounds: mainWindow.getBounds() })
     }
   } catch {}
-  if (backendProcess) {
+  if (backendProcess && backendProcess.pid) {
     if (process.platform === 'win32') {
       // PyInstaller onefile spawns a child process; killing only the parent
-      // leaves the real backend alive holding port 8000. Kill the whole tree.
+      // leaves the real backend alive holding the port. Kill the owned process tree.
       try {
         spawn('taskkill', ['/PID', String(backendProcess.pid), '/T', '/F'], { stdio: 'ignore' })
       } catch {
         try { backendProcess.kill() } catch {}
       }
     } else {
-      backendProcess.kill()
+      try { backendProcess.kill() } catch {}
     }
   }
 })

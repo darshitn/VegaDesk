@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback, useReducer } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { Settings, X, Camera, Maximize2, Minimize2, Bell } from 'lucide-react'
+import { Settings, X, Camera, Maximize2, Minimize2, Bell, LayoutDashboard, Activity } from 'lucide-react'
 import AIBrain from './components/AIBrain'
 import SystemMonitor from './components/SystemMonitor'
 import LiveFeeds from './components/LiveFeeds'
@@ -10,6 +10,9 @@ import NeuralCosmos from './components/NeuralCosmos'
 import HandGestureController from './components/HandGestureController'
 import useChat from './hooks/useChat'
 import { initialVoiceUI, reduceVoiceEvent } from './lib/voiceState'
+import { createHealthPoller } from './lib/healthPoller'
+import { createNotificationDispatcher, requestNotificationPermission } from './lib/notificationService'
+import { getApiBase, getWsBase, getApiPort, isBetaProfile, isSessionVerified, subscribeSession, verifiedFetch } from './lib/apiConfig'
 
 
 const safeGetItem = (key, fallback = '') => {
@@ -19,14 +22,7 @@ const safeSetItem = (key, value) => {
   try { localStorage.setItem(key, value) } catch { /* quota / privacy mode */ }
 }
 
-// Human label per scheduled-alert kind (backend sends `kind`).
-const ALERT_KIND_LABEL = {
-  timer_due: 'Timer',
-  reminder_due: 'Reminder',
-  task_deadline: 'Task deadline',
-  focus_end: 'Focus session',
-  ai_radar_digest: 'AI Radar',
-}
+
 
 export default function App() {
   const [theme, setTheme] = useState('sci-fi-hud')
@@ -52,6 +48,7 @@ export default function App() {
   const [selectedMic, setSelectedMic] = useState('')        // currently selected mic name
   const [isExpanded, setIsExpanded] = useState(false)
   const [activeModule, setActiveModule] = useState(null)
+  const [activeView, setActiveView] = useState(() => safeGetItem('jarvisActiveView', 'workspace'))
 
   const rotationAccRef = useRef({ x: 0, y: 0 })
   const zoomAccRef = useRef(0)
@@ -135,14 +132,28 @@ export default function App() {
     return () => window.removeEventListener('jarvis-zoom', onZoomBtn)
   }, [])
 
-  // Wake-word WebSocket — reconnects forever, survives dashboard hide/show
+  const [sessionVerified, setSessionVerifiedState] = useState(() => isSessionVerified())
+
   useEffect(() => {
+    return subscribeSession((state) => {
+      setSessionVerifiedState(state.verified)
+    })
+  }, [])
+
+  // Wake-word WebSocket — gated on verified backend session identity
+  useEffect(() => {
+    if (!sessionVerified) {
+      voiceDispatch({ type: 'ws_close' })
+      return
+    }
+
     let ws = null
     let reconnectTimer = null
     let isUnmounted = false
 
     const connect = () => {
-      ws = new WebSocket('ws://localhost:8000/ws/voice')
+      if (!isSessionVerified() || isUnmounted) return
+      ws = new WebSocket(`${getWsBase()}/ws/voice`)
 
       // No "active" claim on open: the backend immediately sends the real mic
       // state as a "mic" event, which is what drives the indicator.
@@ -166,7 +177,9 @@ export default function App() {
 
       ws.onclose = () => {
         voiceDispatch({ type: 'ws_close' })
-        if (!isUnmounted) reconnectTimer = setTimeout(connect, 3000)
+        if (!isUnmounted && isSessionVerified()) {
+          reconnectTimer = setTimeout(connect, 3000)
+        }
       }
 
       ws.onerror = () => {
@@ -179,14 +192,16 @@ export default function App() {
     return () => {
       isUnmounted = true
       if (reconnectTimer) clearTimeout(reconnectTimer)
-      if (ws) ws.close()
+      if (ws) {
+        try { ws.close() } catch {}
+      }
     }
-  }, [dispatchTranscript])
+  }, [sessionVerified, dispatchTranscript])
 
   // ── Alert notifications (timer / reminder / task deadline / focus end) ──
   // Owned here so the /ws/alerts socket stays connected while the overlay is
-  // hidden. The OS notification is the channel that's visible then; the in-app
-  // toast is the on-screen fallback when the dashboard is shown.
+  // hidden. OS notifications are dispatched via Electron IPC (or browser Web
+  // Notifications); in-app toasts provide on-screen confirmation and fallback.
   const [toasts, setToasts] = useState([])
   const toastIdRef = useRef(0)
 
@@ -200,32 +215,47 @@ export default function App() {
     setToasts(prev => prev.filter(t => t.id !== id))
   }, [])
 
-  const raiseAlert = useCallback((alert) => {
-    const label = ALERT_KIND_LABEL[alert.kind] || 'Alert'
-    const title = `V.E.G.A. — ${label}`
-    const body = alert.message || 'You have a notification.'
-    try {
-      if (typeof Notification !== 'undefined') {
-        if (Notification.permission === 'granted') {
-          new Notification(title, { body })
-        } else if (Notification.permission !== 'denied') {
-          Notification.requestPermission().then(p => {
-            if (p === 'granted') { try { new Notification(title, { body }) } catch { /* noop */ } }
-          }).catch(() => { /* permission prompt unavailable */ })
+  const dispatcherRef = useRef(null)
+
+  useEffect(() => {
+    const dispatcher = createNotificationDispatcher({
+      electronAPI: typeof window !== 'undefined' ? window.electronAPI : null,
+      NotificationApi: typeof Notification !== 'undefined' ? Notification : null,
+      onToast: pushToast,
+      onNavigate: () => {
+        if (window.electronAPI) window.electronAPI.showWindow()
+        setIsVisible(true)
+        setActiveView('workspace')
+        if (theme === 'neural-cosmos') {
+          setActiveModule('ProductivityHub')
         }
       }
-    } catch { /* notifications unsupported in this context */ }
-    pushToast({ title, body })
-  }, [pushToast])
+    })
+    dispatcherRef.current = dispatcher
 
-  // Alert WebSocket — reconnects forever, survives dashboard hide/show.
+    return () => {
+      dispatcher.cleanup()
+      dispatcherRef.current = null
+    }
+  }, [pushToast, theme])
+
+  const raiseAlert = useCallback((alert) => {
+    if (dispatcherRef.current) {
+      dispatcherRef.current.dispatchAlert(alert)
+    }
+  }, [])
+
+  // Alert WebSocket — gated on verified backend session identity
   useEffect(() => {
+    if (!sessionVerified) return
+
     let ws = null
     let reconnectTimer = null
     let isUnmounted = false
 
     const connect = () => {
-      ws = new WebSocket('ws://localhost:8000/ws/alerts')
+      if (!isSessionVerified() || isUnmounted) return
+      ws = new WebSocket(`${getWsBase()}/ws/alerts`)
       ws.onmessage = (event) => {
         try {
           const data = JSON.parse(event.data)
@@ -234,8 +264,14 @@ export default function App() {
           console.error('[ALERT WS] Parse error:', e)
         }
       }
-      ws.onclose = () => { if (!isUnmounted) reconnectTimer = setTimeout(connect, 3000) }
-      ws.onerror = () => { try { ws.close() } catch { /* already closing */ } }
+      ws.onclose = () => {
+        if (!isUnmounted && isSessionVerified()) {
+          reconnectTimer = setTimeout(connect, 3000)
+        }
+      }
+      ws.onerror = () => {
+        try { ws.close() } catch { /* already closing */ }
+      }
     }
 
     connect()
@@ -243,27 +279,39 @@ export default function App() {
     return () => {
       isUnmounted = true
       if (reconnectTimer) clearTimeout(reconnectTimer)
-      if (ws) ws.close()
-    }
-  }, [raiseAlert])
-
-  // Ask for notification permission once up front (best effort; re-asked lazily
-  // on the first alert if still undecided) so hidden-overlay alerts can surface.
-  useEffect(() => {
-    try {
-      if (typeof Notification !== 'undefined' && Notification.permission === 'default') {
-        Notification.requestPermission().catch(() => { /* ignore */ })
+      if (ws) {
+        try { ws.close() } catch {}
       }
-    } catch { /* unsupported */ }
+    }
+  }, [sessionVerified, raiseAlert])
+
+  // Request notification permission once at startup so desktop alerts can surface
+  useEffect(() => {
+    requestNotificationPermission({
+      electronAPI: typeof window !== 'undefined' ? window.electronAPI : null,
+      NotificationApi: typeof Notification !== 'undefined' ? Notification : null
+    }).catch(() => {})
+  }, [])
+
+  // ── Bounded health status polling & recovery ──
+  useEffect(() => {
+    const poller = createHealthPoller({
+      onStatusChange: (status) => setHealth(status),
+    })
+    return () => poller.stop()
+  }, [])
+
+  // Toggling wake word off closes the backend mic — classic-Bluetooth headsets
+  // then leave Hands-Free Profile and their audio playback quality recovers.
+  const postVoiceEnabled = useCallback((enabled) => {
+    verifiedFetch(`${getApiBase()}/api/voice/enabled`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled })
+    }).catch(() => { /* backend offline or unverified session */ })
   }, [])
 
   useEffect(() => {
-    const controller = new AbortController()
-    fetch('http://localhost:8000/health', { signal: controller.signal })
-      .then(res => res.json())
-      .then(data => setHealth(data.status))
-      .catch(() => { if (!controller.signal.aborted) setHealth('Offline') })
-
     // Re-sync the persisted wake-word preference to the backend on launch
     if (safeGetItem('jarvisWakeWordEnabled') === 'false') postVoiceEnabled(false)
 
@@ -294,7 +342,6 @@ export default function App() {
       window.addEventListener('keydown', handleKeyDown)
 
       return () => {
-        controller.abort()
         cleanupTheme?.()
         cleanupVis?.()
         window.removeEventListener('keydown', handleKeyDown)
@@ -308,10 +355,9 @@ export default function App() {
     window.addEventListener('keydown', handleKeyDownBrowser)
 
     return () => {
-      controller.abort()
       window.removeEventListener('keydown', handleKeyDownBrowser)
     }
-  }, [])
+  }, [postVoiceEnabled])
 
   // When exit animation completes, tell Electron to physically hide the window.
   // In browser (no electronAPI) we must NOT stay hidden — restore visibility to avoid blank white screen.
@@ -357,16 +403,6 @@ export default function App() {
     safeSetItem('jarvisCameraEnabled', next.toString())
   }
 
-  // Toggling wake word off closes the backend mic — classic-Bluetooth headsets
-  // then leave Hands-Free Profile and their audio playback quality recovers.
-  const postVoiceEnabled = (enabled) => {
-    fetch('http://localhost:8000/api/voice/enabled', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ enabled })
-    }).catch(() => { /* backend offline — nothing to sync */ })
-  }
-
   const handleToggleWakeWord = () => {
     const next = !wakeWordEnabled
     setWakeWordEnabled(next)
@@ -376,7 +412,7 @@ export default function App() {
 
   // Fetch input devices from backend when settings panel opens
   const fetchMicDevices = () => {
-    fetch('http://localhost:8000/api/voice/devices')
+    fetch(`${getApiBase()}/api/voice/devices`)
       .then(r => r.json())
       .then(data => {
         setMicDevices(data.devices || [])
@@ -388,11 +424,11 @@ export default function App() {
   const handleMicChange = (e) => {
     const name = e.target.value
     setSelectedMic(name)
-    fetch('http://localhost:8000/api/voice/device', {
+    verifiedFetch(`${getApiBase()}/api/voice/device`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ name })
-    }).catch(() => { /* backend offline */ })
+    }).catch(() => { /* backend offline or unverified session */ })
   }
 
   // ── Expanded (full-screen) state — native IPC in Electron, Fullscreen API in browser ──
@@ -417,6 +453,23 @@ export default function App() {
       document.documentElement.requestFullscreen?.().catch(() => {})
     }
   }
+
+  // Keyboard navigation shortcuts: Alt+1 = Workspace, Alt+2 = System & Feeds
+  useEffect(() => {
+    const handleKeyDown = (e) => {
+      if (e.altKey && e.key === '1') {
+        e.preventDefault()
+        setActiveView('workspace')
+        safeSetItem('jarvisActiveView', 'workspace')
+      } else if (e.altKey && e.key === '2') {
+        e.preventDefault()
+        setActiveView('telemetry')
+        safeSetItem('jarvisActiveView', 'telemetry')
+      }
+    }
+    window.addEventListener('keydown', handleKeyDown)
+    return () => window.removeEventListener('keydown', handleKeyDown)
+  }, [])
 
   const handleWizardComplete = (data) => {
     setUserName(data.userName)
@@ -468,6 +521,15 @@ export default function App() {
                   <div className="status-dot"></div>
                   <h1 className="text-xl font-bold tracking-widest m-0">V.E.G.A.</h1>
                   <span className="text-xs opacity-70 ml-2">[{health}]</span>
+                  {isBetaProfile() && (
+                    <span
+                      id="beta-profile-badge"
+                      className="text-[10px] font-mono font-bold tracking-wider px-2 py-0.5 rounded bg-amber-500/20 text-amber-300 border border-amber-500/40 ml-2 select-none"
+                      title={`Isolated Synthetic Beta Profile (Port ${getApiPort()})`}
+                    >
+                      BETA PROFILE · PORT {getApiPort()}
+                    </span>
+                  )}
                   {theme === 'neural-cosmos' && cameraEnabled && isVisible && (
                     <div className="flex items-center gap-1 text-xs text-[#00ff66] animate-pulse bg-[#00ff66]/10 px-2 py-1 rounded">
                       <Camera size={12} />
@@ -475,6 +537,30 @@ export default function App() {
                     </div>
                   )}
                 </div>
+
+                {/* View switcher tabs: Daily Workspace vs System & Feeds */}
+                {theme !== 'neural-cosmos' && (
+                  <nav className="flex items-center gap-1 bg-black/40 border border-current/20 rounded-lg p-0.5 no-drag" style={{ WebkitAppRegion: 'no-drag' }} aria-label="Dashboard views">
+                    <button
+                      onClick={() => { setActiveView('workspace'); safeSetItem('jarvisActiveView', 'workspace') }}
+                      className={`nav-tab ${activeView === 'workspace' ? 'active' : ''}`}
+                      title="Daily Workspace: Today, Focus, Tasks, and AI Assistant (Alt+1)"
+                      aria-label="Daily Workspace"
+                    >
+                      <LayoutDashboard size={14} />
+                      <span className="hidden sm:inline">Workspace</span>
+                    </button>
+                    <button
+                      onClick={() => { setActiveView('telemetry'); safeSetItem('jarvisActiveView', 'telemetry') }}
+                      className={`nav-tab ${activeView === 'telemetry' ? 'active' : ''}`}
+                      title="System Telemetry & Live Feeds (Alt+2)"
+                      aria-label="System Telemetry and Feeds"
+                    >
+                      <Activity size={14} />
+                      <span className="hidden sm:inline">System &amp; Feeds</span>
+                    </button>
+                  </nav>
+                )}
                 <div className="flex items-center gap-2 no-drag" style={{ WebkitAppRegion: 'no-drag' }}>
                   <button
                     className={`btn p-1 transition-transform hover:scale-110 active:scale-95 ${showSettings ? 'bg-[var(--accent)] text-black border-[var(--accent)]' : ''}`}
@@ -554,13 +640,13 @@ export default function App() {
                         <div className="flex items-center gap-2">
                           <label className="text-sm font-semibold">LLM Engine:</label>
                           <div className="toggle-group">
-                            {['gemini', 'ollama'].map(p => (
+                            {['none', 'ollama', 'gemini'].map(p => (
                               <button
                                 key={p}
                                 className={`toggle-btn ${llmProvider === p ? 'active' : ''}`}
                                 onClick={() => handleLlmProviderChange(llmProvider === p ? null : p)}
                               >
-                                {p === 'gemini' ? 'Gemini API' : 'Local Ollama'}
+                                {p === 'none' ? 'Offline Only' : (p === 'gemini' ? 'Gemini API' : 'Local Ollama')}
                               </button>
                             ))}
                           </div>
@@ -702,17 +788,24 @@ export default function App() {
                     </div>
                   )}
                 </main>
-              ) : (
+              ) : activeView === 'telemetry' ? (
                 <main className="dashboard-layout custom-scrollbar">
-                  <div className="dashboard-column custom-scrollbar" role="region" aria-label="Assistant and productivity" tabIndex={0}>
-                    <div className="dashboard-chat">
-                      <AIBrain {...aiBrainProps} />
-                    </div>
+                  <div className="dashboard-column custom-scrollbar" role="region" aria-label="System telemetry" tabIndex={0}>
+                    <SystemMonitor />
+                  </div>
+                  <div className="dashboard-column custom-scrollbar" role="region" aria-label="Live feeds and radar" tabIndex={0}>
+                    <LiveFeeds city={weatherCity} cryptoCoins={cryptoCoins} />
+                  </div>
+                </main>
+              ) : (
+                <main className="workspace-layout custom-scrollbar">
+                  <div className="workspace-column custom-scrollbar" role="region" aria-label="Daily productivity and workspaces" tabIndex={0}>
                     <ProductivityHub />
                   </div>
-                  <div className="dashboard-column custom-scrollbar" role="region" aria-label="System and feeds" tabIndex={0}>
-                    <SystemMonitor />
-                    <LiveFeeds city={weatherCity} cryptoCoins={cryptoCoins} />
+                  <div className="workspace-column custom-scrollbar flex flex-col gap-4" role="region" aria-label="AI Assistant and quick capture" tabIndex={0}>
+                    <div className="dashboard-chat flex-1 min-h-[360px]">
+                      <AIBrain {...aiBrainProps} />
+                    </div>
                   </div>
                 </main>
               )}
@@ -731,7 +824,14 @@ export default function App() {
                   animate={{ opacity: 1, x: 0 }}
                   exit={{ opacity: 0, x: 40 }}
                   transition={{ duration: 0.15 }}
-                  className="flex items-start gap-3 px-4 py-3 rounded border border-[var(--accent)]/40 bg-black/85 backdrop-blur shadow-lg max-w-xs"
+                  onClick={() => {
+                    setActiveView('workspace')
+                    if (theme === 'neural-cosmos') {
+                      setActiveModule('ProductivityHub')
+                    }
+                    dismissToast(t.id)
+                  }}
+                  className="flex items-start gap-3 px-4 py-3 rounded border border-[var(--accent)]/40 bg-black/85 backdrop-blur shadow-lg max-w-xs cursor-pointer hover:border-[var(--accent)] transition-colors"
                 >
                   <Bell size={16} className="text-[var(--accent)] mt-0.5 shrink-0" />
                   <div className="flex-1 min-w-0">
@@ -739,7 +839,10 @@ export default function App() {
                     <div className="text-sm mt-0.5 break-words">{t.body}</div>
                   </div>
                   <button
-                    onClick={() => dismissToast(t.id)}
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      dismissToast(t.id)
+                    }}
                     className="opacity-50 hover:opacity-100 shrink-0"
                     aria-label="Dismiss notification"
                   >
