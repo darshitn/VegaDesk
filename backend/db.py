@@ -12,10 +12,28 @@ if getattr(__import__('sys'), 'frozen', False):
 else:
     base_dir = os.path.dirname(__file__)
 
+import sys
+backend_dir = os.path.dirname(__file__)
+if backend_dir not in sys.path:
+    sys.path.insert(0, backend_dir)
+
 # JARVIS_DB_PATH overrides the location (used by tests with a temporary DB and
 # available for future user-data-dir relocation). Never point it at real data
 # during tests.
-DB_PATH = os.getenv("JARVIS_DB_PATH") or os.path.join(base_dir, "jarvis.db")
+if os.getenv("VEGA_PROFILE") == "beta":
+    try:
+        from beta_target import resolve_beta_db_path
+    except ImportError:
+        try:
+            from backend.beta_target import resolve_beta_db_path
+        except ImportError:
+            from .beta_target import resolve_beta_db_path
+    DB_PATH = resolve_beta_db_path()
+elif os.getenv("JARVIS_DB_PATH"):
+    DB_PATH = os.getenv("JARVIS_DB_PATH")
+else:
+    DB_PATH = os.path.join(base_dir, "jarvis.db")
+
 SQLALCHEMY_DATABASE_URL = f"sqlite:///{DB_PATH}"
 
 engine = create_engine(
