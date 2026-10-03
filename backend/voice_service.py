@@ -35,6 +35,7 @@ def _log(msg):
 _clients: list = []         # connected WebSocket objects
 _lock = threading.Lock()
 _event_queue: asyncio.Queue = None  # set in start()
+_audio_thread_handle: threading.Thread = None
 _voice_active: bool = False
 _voice_error: str = ""
 _enabled = threading.Event()
@@ -131,9 +132,6 @@ def filter_hallucination(transcript: str) -> str:
         return ""
     return text
 
-
-def is_voice_active():
-    return _voice_active if not _voice_error else _voice_error
 
 def is_enabled():
     return _enabled.is_set()
@@ -651,11 +649,74 @@ async def _dispatch_events():
 # ──────────────────────────────────────────────
 def start(loop: asyncio.AbstractEventLoop):
     """Called once from FastAPI startup. Launches the audio thread + async dispatcher."""
-    global _event_queue
+    global _event_queue, _audio_thread_handle
     _event_queue = asyncio.Queue()
 
-    t = threading.Thread(target=_audio_thread, daemon=True, name="jarvis-voice")
-    t.start()
+    _audio_thread_handle = threading.Thread(target=_audio_thread, daemon=True, name="jarvis-voice")
+    _audio_thread_handle.start()
 
     loop.create_task(_dispatch_events())
     _log("[VOICE] Voice service started.")
+
+
+def is_voice_active() -> bool:
+    return bool(_voice_active)
+
+
+def _sanitize_voice_error(err: Any) -> Optional[str]:
+    if err is None:
+        return None
+    err_str = str(err)
+    if not err_str:
+        return None
+    import re
+    # If the error string contains paths, strip to safe reason
+    if re.search(r"[A-Za-z]:[\\/]|/(?:Users|home|root|tmp)/", err_str):
+        return "Audio hardware unavailable"
+    err_lower = err_str.lower()
+    if "no microphone" in err_lower or "no input" in err_lower or "device" in err_lower:
+        return "Microphone unavailable"
+    if "disabled by user" in err_lower:
+        return None
+    # Strip any potential tokens/secrets
+    err_str = re.sub(r"(AIza[0-9A-Za-z-_]{35})", "<redacted>", err_str)
+    err_str = re.sub(r"(sk-[0-9A-Za-z]{20,})", "<redacted>", err_str)
+    err_str = re.sub(r"\b[0-9a-fA-F]{24,}\b", "<redacted>", err_str)
+    return err_str[:120]
+
+
+def get_status() -> dict:
+    disabled = os.getenv("VEGA_DISABLE_VOICE", "").strip() in ("1", "true", "yes")
+    user_disabled = not _enabled.is_set()
+    if disabled or user_disabled:
+        return {
+            "status": "disabled",
+            "active": False,
+            "enabled": False if disabled else _enabled.is_set(),
+            "error": None,
+        }
+    if _voice_error:
+        safe_err = _sanitize_voice_error(_voice_error)
+        return {
+            "status": "unavailable",
+            "active": False,
+            "enabled": _enabled.is_set(),
+            "error": safe_err,
+        }
+    if _voice_active:
+        return {
+            "status": "ready",
+            "active": True,
+            "enabled": True,
+            "error": None,
+        }
+    # Voice is enabled, not active, no error yet:
+    # Starting only if the stream thread is actively running
+    is_starting = bool(_event_queue is not None and _audio_thread_handle is not None and _audio_thread_handle.is_alive())
+    status = "starting" if is_starting else "unavailable"
+    return {
+        "status": status,
+        "active": False,
+        "enabled": True,
+        "error": None,
+    }

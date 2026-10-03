@@ -75,12 +75,12 @@ class GeminiProvider(BaseProvider):
         )
         super().__init__(caps)
 
-    def _client(self):
+    def _client(self, http_options=None):
         if not (self._api_key or "").strip():
             raise ProviderUnavailable(
                 "GEMINI_API_KEY is not configured. Set it in backend/.env or switch the provider to 'ollama'.")
         from google import genai
-        return genai.Client(api_key=self._api_key)
+        return genai.Client(api_key=self._api_key, http_options=http_options)
 
     def _call(self, messages, tools, timeout_s) -> ProviderResponse:
         from google.genai import types
@@ -104,8 +104,10 @@ class GeminiProvider(BaseProvider):
                 ) for t in tools
             ])]
 
+        timeout_ms = max(100, int(timeout_s * 1000))
+        http_options = types.HttpOptions(timeout=timeout_ms)
         try:
-            client = self._client()
+            client = self._client(http_options=http_options)
             response = client.models.generate_content(
                 model=self.model,
                 contents=contents,
@@ -113,6 +115,7 @@ class GeminiProvider(BaseProvider):
                     system_instruction=system_text or None,
                     tools=gemini_tools,
                     max_output_tokens=self.capabilities.reserved_output,
+                    http_options=http_options,
                 ),
             )
         except ProviderUnavailable:

@@ -1,10 +1,16 @@
 from fastapi import FastAPI, Depends, UploadFile, File, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 from contextlib import asynccontextmanager
 import asyncio
 import sys
 import os
+
+try:
+    from providers.base import redact_secrets
+except ImportError:
+    from .providers.base import redact_secrets
 
 # Support both `python -m backend.main` and `python backend/run.py` / PyInstaller
 try:
@@ -51,6 +57,7 @@ radar_scheduler = RadarScheduler(SessionLocal, clock=SYSTEM_CLOCK)
 async def lifespan(app: FastAPI):
     loop = asyncio.get_running_loop()
     scheduler_task = loop.create_task(alert_scheduler.run())
+    alert_scheduler._loop_task = scheduler_task
     # VEGA_DISABLE_VOICE=1 keeps the mic/whisper threads off (tests, headless runs).
     if os.getenv("VEGA_DISABLE_VOICE", "").strip() not in ("1", "true", "yes"):
         voice_service.start(loop)
@@ -78,6 +85,7 @@ def get_db():
 
 
 # Allow CORS for Electron/React frontend + dev servers
+_configured_port = os.getenv("VEGA_PORT", "8000")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -85,6 +93,10 @@ app.add_middleware(
         "http://127.0.0.1:5173",
         "http://localhost:8000",
         "http://127.0.0.1:8000",
+        "http://localhost:8005",
+        "http://127.0.0.1:8005",
+        f"http://localhost:{_configured_port}",
+        f"http://127.0.0.1:{_configured_port}",
         "app://-",
         "file://",
     ],
@@ -94,28 +106,146 @@ app.add_middleware(
 )
 
 
-@app.get("/health")
-def health_check():
-    # Include voice status if available
-    voice_ok = getattr(voice_service, "is_voice_active", lambda: None)()
-    return {"status": "ok", "voice": voice_ok}
-
-
 import requests
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field
 from typing import List, Optional
 from urllib.parse import quote
 
-# Load .env explicitly from the backend directory
-dotenv_path = os.path.join(os.path.dirname(__file__), '.env')
-load_dotenv(dotenv_path)
+# Load .env explicitly from the backend directory (only in non-beta mode)
+is_beta_profile = os.getenv("VEGA_PROFILE") == "beta"
+
+if not is_beta_profile:
+    dotenv_path = os.path.join(os.path.dirname(__file__), '.env')
+    load_dotenv(dotenv_path)
+else:
+    # Beta profile is strictly isolated from personal credentials
+    # Scrub any inherited cloud keys so cloud inference or paid services are never contacted
+    for key in ["GEMINI_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GROQ_API_KEY", "MISTRAL_API_KEY"]:
+        os.environ.pop(key, None)
+    os.environ["LLM_PROVIDER"] = "none"
+    os.environ["VEGA_DISABLE_VOICE"] = "1"
+    os.environ["VEGA_DISABLE_RADAR"] = "1"
 
 # Configured provider (env). A per-request `provider` field may override it;
 # there is NO automatic fallback between providers — a failure on the
 # configured provider is reported honestly instead of silently routing
 # private data to another service.
-LLM_PROVIDER = os.getenv("LLM_PROVIDER", "gemini").lower()
+LLM_PROVIDER = os.getenv("LLM_PROVIDER", "none" if is_beta_profile else "gemini").lower()
+
+
+@app.get("/health")
+def health_check(diagnostics: bool = False):
+    """Truthful liveness and readiness inspection.
+
+    Preserves exact legacy 'status' and 'voice' fields for Electron clients while
+    exposing structured readiness across database, scheduler, voice service, and provider.
+    Never generates tokens, downloads models, contacts cloud providers, or mutates data.
+    """
+    now_iso = SYSTEM_CLOCK.now_utc().isoformat()
+
+    # 1. Core SQLite database probe (read-only, fast, non-mutating)
+    db_status = "unavailable"
+    db_error = None
+    try:
+        with SessionLocal() as session:
+            session.execute(text("SELECT 1"))
+        db_status = "ready"
+    except Exception as e:
+        db_status = "unavailable"
+        db_error = f"{type(e).__name__}: database probe failed"
+
+    # 2. Scheduler state
+    sched_status = alert_scheduler.get_status()
+
+    # 3. Voice state
+    voice_info = voice_service.get_status()
+    voice_ok = voice_service.is_voice_active()
+
+    # 4. Provider state
+    is_beta = os.getenv("VEGA_PROFILE") == "beta"
+    env_provider = os.getenv("LLM_PROVIDER")
+    if is_beta or env_provider == "none":
+        configured_provider = "none"
+    elif LLM_PROVIDER != os.getenv("LLM_PROVIDER", "gemini"):
+        configured_provider = (LLM_PROVIDER or "gemini").lower()
+    elif env_provider:
+        configured_provider = env_provider.lower()
+    else:
+        configured_provider = (LLM_PROVIDER or "gemini").lower()
+    provider_status = "unknown"
+    provider_error = None
+    configured_model = ""
+
+    if configured_provider == "gemini":
+        configured_model = (os.getenv("GEMINI_MODEL", "gemini-2.5-flash") or "").strip()
+        has_key = bool((os.getenv("GEMINI_API_KEY") or "").strip())
+        if not has_key:
+            provider_status = "unconfigured"
+            provider_error = "GEMINI_API_KEY is not configured in backend/.env."
+        else:
+            provider_status = "configured"
+    elif configured_provider == "ollama":
+        configured_model = (os.getenv("OLLAMA_MODEL", "llama3") or "").strip()
+        base_url = (os.getenv("OLLAMA_BASE_URL", "http://localhost:11434") or "").rstrip("/")
+        provider_status = "configured"
+
+        # Explicit optional diagnostics: bounded local Ollama metadata check ONLY if requested
+        if diagnostics:
+            try:
+                resp = requests.get(f"{base_url}/api/tags", timeout=0.5)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    models = [m.get("name", "") for m in data.get("models", [])]
+                    model_found = any(
+                        configured_model == m or m.startswith(f"{configured_model}:")
+                        for m in models
+                    )
+                    provider_status = "ready" if model_found else "missing_model"
+                    if not model_found:
+                        provider_error = f"Model '{configured_model}' not found in local Ollama tags."
+                else:
+                    provider_status = "unavailable"
+                    provider_error = f"Ollama HTTP {resp.status_code}"
+            except Exception:
+                provider_status = "unavailable"
+                provider_error = "Ollama is not reachable on local port."
+    elif configured_provider == "none":
+        provider_status = "disabled"
+        provider_error = None
+        configured_model = "none"
+    else:
+        provider_status = "unconfigured"
+        provider_error = f"Unknown provider '{configured_provider}'."
+
+    provider_info = {
+        "name": configured_provider,
+        "status": provider_status,
+        "model": configured_model,
+        "checked_at": now_iso,
+        "error": provider_error,
+    }
+
+    overall_status = "ok" if db_status == "ready" else "degraded"
+    profile_name = os.getenv("VEGA_PROFILE", "default")
+    run_id = os.getenv("VEGA_RUN_ID", "default")
+    is_beta = profile_name == "beta"
+
+    return {
+        "status": overall_status,
+        "voice": voice_ok,
+        "profile": profile_name,
+        "run_id": run_id,
+        "deterministic_only": is_beta or configured_provider == "none",
+        "database": {
+            "status": db_status,
+            "checked_at": now_iso,
+            "error": db_error,
+        },
+        "scheduler": sched_status,
+        "voice_service": voice_info,
+        "provider": provider_info,
+    }
 
 
 class Message(BaseModel):
@@ -178,10 +308,11 @@ def chat_endpoint(req: ChatRequest, db: Session = Depends(get_db)):
     #    bounded context -> registry-validated proposal -> the SAME executor
     #    and receipts the deterministic path uses. One action per request.
     user_name = req.userName.strip() if req.userName and req.userName.strip() else "Sir"
+    effective_provider = "none" if (os.getenv("VEGA_PROFILE") == "beta") else (req.provider.lower() if req.provider else LLM_PROVIDER)
     out = model_lane.run_model_turn(
         SessionLocal, SYSTEM_CLOCK, req.message, req.history,
         user_name=user_name,
-        provider_name=(req.provider.lower() if req.provider else LLM_PROVIDER),
+        provider_name=effective_provider,
         source=src,
         idempotency_key=req.idempotencyKey,
     )
@@ -213,6 +344,10 @@ ALLOWED_WS_ORIGINS = {
     "http://127.0.0.1:5173",
     "http://localhost:8000",   # same-origin
     "http://127.0.0.1:8000",
+    "http://localhost:8005",   # beta profile origin
+    "http://127.0.0.1:8005",
+    f"http://localhost:{_configured_port}",
+    f"http://127.0.0.1:{_configured_port}",
     "app://-",                 # kept for parity with the CORS allowlist
     "file://",                 # Electron loadFile (packaged app)
     "null",                    # Chromium serializes file/opaque origins as "null"

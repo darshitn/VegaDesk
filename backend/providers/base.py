@@ -152,7 +152,13 @@ class BaseProvider:
         deadline = deadline if deadline is not None else (time.monotonic() + DEFAULT_DEADLINE_S)
         # Module-level lookup so the bounded-wait policy is test-tunable.
         queue_timeout = globals().get("QUEUE_TIMEOUT_S", QUEUE_TIMEOUT_S)
-        if not self._slot.acquire(timeout=queue_timeout):
+        remaining_budget = deadline - time.monotonic()
+        if remaining_budget <= 0:
+            raise ProviderTimeout("The model took too long to answer. Your tasks and history are unchanged.")
+        wait_budget = min(queue_timeout, remaining_budget)
+        if not self._slot.acquire(timeout=wait_budget):
+            if time.monotonic() >= deadline:
+                raise ProviderTimeout("The model took too long to answer. Your tasks and history are unchanged.")
             raise ProviderUnavailable(
                 "VEGA is still working on another request. Please wait a moment and try again.")
         try:

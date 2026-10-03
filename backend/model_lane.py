@@ -33,7 +33,7 @@ except ImportError:
         DEFAULT_DEADLINE_S, redact_secrets)
     from .providers.base import ToolProposal
 
-VALID_PROVIDERS = ("ollama", "gemini")
+VALID_PROVIDERS = ("ollama", "gemini", "none")
 
 # "create_task": { … } / "start_timer": [ … ] as it appears inside a leaked
 # proposal — see _sanitize_text.
@@ -138,11 +138,19 @@ def run_model_turn(db_factory, clock, message, history, user_name="Sir",
     existing executor after a successful, validated proposal."""
     name = (provider_name or "").strip().lower() or None
     if name is not None and name not in VALID_PROVIDERS:
-        return _result(None, "none", error=f"Invalid LLM provider '{name}'. Use 'gemini' or 'ollama'.")
+        return _result(None, "none", error=f"Invalid LLM provider '{name}'. Supported providers are: {VALID_PROVIDERS}")
+    if name == "none":
+        return _result(
+            "VEGA is running in deterministic-only mode (no AI model selected). "
+            "Supported offline commands (tasks, timers, reminders, notes, workspaces) still work. "
+            "To enable conversational AI, select Ollama (local) or Gemini (cloud) in Settings.",
+            "none",
+            clarification=True,
+        )
     try:
         provider = get_provider(name or "ollama")
     except ValueError:
-        return _result(None, "none", error=f"Invalid LLM provider '{name}'. Use 'gemini' or 'ollama'.")
+        return _result(None, "none", error=f"Invalid LLM provider '{name}'. Supported providers are: {VALID_PROVIDERS}")
     mode = "local" if provider.capabilities.local else "cloud"
 
     # ── Capability boundary, before the provider is consulted ───────────────
@@ -189,11 +197,22 @@ def run_model_turn(db_factory, clock, message, history, user_name="Sir",
             mode, clarification=True)
 
     if result.proposals:
+        if time.monotonic() >= deadline:
+            return _result(
+                "The request timed out before the proposed action could be executed. Nothing was executed.",
+                "none",
+            )
         proposal = result.proposals[0]
         try:
             validated = tool_registry.validate_proposal(proposal, clock)
         except tool_registry.ProposalRejected as e:
             return _result(f"{e} Nothing was executed.", mode, clarification=True)
+
+        if time.monotonic() >= deadline:
+            return _result(
+                "The request timed out before the proposed action could be executed. Nothing was executed.",
+                "none",
+            )
 
         entry = validated["entry"]
         if entry.get("produces_receipt"):

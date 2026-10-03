@@ -24,6 +24,7 @@ import asyncio
 import os
 import threading
 from datetime import timedelta
+from typing import Optional
 
 from sqlalchemy import update
 
@@ -47,6 +48,10 @@ class AlertScheduler:
         self._grace = timedelta(minutes=grace_minutes)
         self._clients: set = set()
         self._lock = threading.Lock()
+        self._last_tick_utc = None
+        self._last_error = None
+        self._is_running = False
+        self._loop_task = None
 
     # ── subscriber management (called from the event loop) ──
     def subscribe(self, ws):
@@ -61,16 +66,56 @@ class AlertScheduler:
         with self._lock:
             return bool(self._clients)
 
+    def get_status(self) -> dict:
+        is_alive = self._is_running
+        if self._loop_task is not None:
+            is_alive = not self._loop_task.done() and not self._loop_task.cancelled()
+        safe_error = self._sanitize_error(self._last_error)
+        status = "ready" if is_alive and not safe_error else ("degraded" if safe_error else ("starting" if self._loop_task else "stopped"))
+        return {
+            "status": status,
+            "running": is_alive,
+            "last_tick": self._last_tick_utc.isoformat() if self._last_tick_utc else None,
+            "error": safe_error,
+            "client_count": len(self._clients),
+        }
+
+    @staticmethod
+    def _sanitize_error(err: Any) -> Optional[str]:
+        if err is None:
+            return None
+        err_str = str(err)
+        if not err_str:
+            return None
+        import re
+        # If the error string contains paths, strip them to a stable safe reason
+        if re.search(r"[A-Za-z]:[\\/]|/(?:Users|home|root|tmp)/", err_str):
+            m = re.match(r"^([A-Za-z0-9_]+Error):", err_str)
+            exc_type = m.group(1) if m else "Error"
+            return f"{exc_type}: scheduler tick failed"
+        # Redact secrets if any
+        err_str = re.sub(r"(AIza[0-9A-Za-z-_]{35})", "<redacted>", err_str)
+        err_str = re.sub(r"(sk-[0-9A-Za-z]{20,})", "<redacted>", err_str)
+        err_str = re.sub(r"\b[0-9a-fA-F]{24,}\b", "<redacted>", err_str)
+        return err_str[:120]
+
     # ── main loop ──
     async def run(self):
-        while True:
-            try:
-                delivered = await asyncio.to_thread(self.tick)
-                for alert in delivered:
-                    await self._broadcast(alert)
-            except Exception as e:  # keep the scheduler alive; log observably
-                print(f"[SCHEDULER] tick error: {e}", flush=True)
-            await asyncio.sleep(self._poll_seconds)
+        self._is_running = True
+        try:
+            while True:
+                try:
+                    delivered = await asyncio.to_thread(self.tick)
+                    self._last_tick_utc = self._clock.now_utc()
+                    self._last_error = None
+                    for alert in delivered:
+                        await self._broadcast(alert)
+                except Exception as e:  # keep the scheduler alive; log observably
+                    self._last_error = f"{type(e).__name__}: scheduler tick failed"
+                    print(f"[SCHEDULER] tick error: {e}", flush=True)
+                await asyncio.sleep(self._poll_seconds)
+        finally:
+            self._is_running = False
 
     async def _broadcast(self, alert: dict):
         dead = []
