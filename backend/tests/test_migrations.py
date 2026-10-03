@@ -167,7 +167,20 @@ def test_v5_adds_receipt_target_key_without_losing_old_receipts(tmp_path):
     with engine.begin() as conn:
         conn.execute(text("CREATE TABLE schema_version (version INTEGER NOT NULL)"))
         conn.execute(text("INSERT INTO schema_version VALUES (4)"))
-        conn.execute(text("CREATE TABLE action_receipts (id INTEGER PRIMARY KEY, idempotency_key VARCHAR(120), action VARCHAR(60) NOT NULL, success BOOLEAN NOT NULL, message TEXT NOT NULL)"))
+        conn.execute(text("""
+            CREATE TABLE action_receipts (
+                id INTEGER PRIMARY KEY,
+                idempotency_key VARCHAR(120) UNIQUE,
+                action VARCHAR(60) NOT NULL,
+                success BOOLEAN NOT NULL DEFAULT 1,
+                entity_type VARCHAR(30),
+                entity_id INTEGER,
+                message TEXT NOT NULL DEFAULT '',
+                command_text VARCHAR(600),
+                source VARCHAR(50),
+                created_utc DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+        """))
         conn.execute(text("INSERT INTO action_receipts (id, idempotency_key, action, success, message) VALUES (1, 'old-key', 'open_app', 1, 'old receipt')"))
     info = migrations.run_migrations(engine, Base, db_file)
     assert info["version_before"] == 4 and info["version_after"] == 5
