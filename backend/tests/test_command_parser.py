@@ -350,3 +350,39 @@ def test_open_alternative_message_tells_the_user_how_to_get_the_tab():
     assert "Nothing was opened either" in launched["message"]
     assert "open your calendar" in launched["message"]
     assert launched["destination"] == plain["destination"]
+
+
+def test_task_creation_phrasing_regressions():
+    """Regression tests for observed deterministic task parsing failures.
+    1. 'Add a new task to review sorting algorithms' previously failed (returned None).
+    2. 'Add a task to review sorting algorithms' previously captured 'to review sorting algorithms'.
+    Both must parse to intent 'create_task' with clean text 'review sorting algorithms'.
+    """
+    c = clock()
+    # 1. 'Add a new task to review sorting algorithms'
+    r1 = parse_command("Add a new task to review sorting algorithms", c)
+    assert r1 is not None and r1["type"] == "intent"
+    assert r1["intent"] == "create_task"
+    assert r1["params"]["text"] == "review sorting algorithms"
+    assert r1["params"]["deadline_utc"] is None
+
+    # 2. 'Add a task to review sorting algorithms'
+    r2 = parse_command("Add a task to review sorting algorithms", c)
+    assert r2 is not None and r2["type"] == "intent"
+    assert r2["intent"] == "create_task"
+    assert r2["params"]["text"] == "review sorting algorithms"
+    assert r2["params"]["deadline_utc"] is None
+
+    # 3. Phrasings with deadline
+    r3 = parse_command("Add a new task to review sorting algorithms by Friday at 6 PM", c)
+    assert r3 is not None and r3["type"] == "intent"
+    assert r3["intent"] == "create_task"
+    assert r3["params"]["text"] == "review sorting algorithms"
+    assert r3["params"]["deadline_utc"] == datetime(2026, 9, 25, 12, 30, 0)
+
+    # 4. Other natural variants
+    r4 = parse_command("Create a new task: review sorting algorithms", c)
+    assert r4 is not None and r4["params"]["text"] == "review sorting algorithms"
+
+    r5 = parse_command("Add a task called review sorting algorithms", c)
+    assert r5 is not None and r5["params"]["text"] == "review sorting algorithms"

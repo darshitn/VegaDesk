@@ -13,6 +13,7 @@ import { initialVoiceUI, reduceVoiceEvent } from './lib/voiceState'
 import { createHealthPoller } from './lib/healthPoller'
 import { createNotificationDispatcher, requestNotificationPermission } from './lib/notificationService'
 import { getApiBase, getWsBase, getApiPort, isBetaProfile, isSessionVerified, subscribeSession, verifiedFetch } from './lib/apiConfig'
+import { handleVoiceMessage, sendInterruptAck } from './lib/voiceInterruption'
 
 
 const safeGetItem = (key, fallback = '') => {
@@ -74,6 +75,9 @@ export default function App() {
   // holds a stale send callback.
   const sendMessageRef = useRef(chat.sendMessage)
   useEffect(() => { sendMessageRef.current = chat.sendMessage }, [chat.sendMessage])
+
+  const chatRef = useRef(chat)
+  useEffect(() => { chatRef.current = chat }, [chat])
 
   const dispatchTranscript = useCallback((text) => {
     const t = typeof text === 'string' ? text.trim() : ''
@@ -160,16 +164,24 @@ export default function App() {
       ws.onmessage = (event) => {
         try {
           const data = JSON.parse(event.data)
-          if (data.type === 'wake') {
-            if (window.electronAPI) window.electronAPI.showWindow()
-            setIsVisible(true)
-          }
-          if (data.type === 'transcript' && data.text && data.text.trim()) {
-            dispatchTranscript(data.text.trim())
-          }
-          // The reducer owns every state transition (idle/wake/listening/
-          // processing, mic truth, terminal notes) — see lib/voiceState.js.
-          voiceDispatch(data)
+          handleVoiceMessage(data, {
+            speechSession: chatRef.current?.speechSession || {
+              stopSpeaking: () => chatRef.current?.stopSpeaking(),
+              get isSpeaking() { return chatRef.current?.isSpeaking },
+            },
+            sendAck: (intId) => sendInterruptAck({
+              ws,
+              interruptionId: intId,
+              apiBase: getApiBase(),
+              fetchFn: verifiedFetch,
+            }),
+            onShowWindow: () => {
+              if (window.electronAPI) window.electronAPI.showWindow()
+              setIsVisible(true)
+            },
+            onTranscript: dispatchTranscript,
+            voiceDispatch,
+          })
         } catch (e) {
           console.error('[VOICE WS] Parse error:', e)
         }
@@ -308,13 +320,38 @@ export default function App() {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ enabled })
-    }).catch(() => { /* backend offline or unverified session */ })
-  }, [])
+    })
+      .then(async (r) => {
+        const data = await r.json()
+        if (data.error) {
+          pushToast({ title: 'Voice Mode', message: data.error, type: 'warning' })
+          setWakeWordEnabled(Boolean(data.enabled))
+          safeSetItem('jarvisWakeWordEnabled', Boolean(data.enabled).toString())
+        } else if (typeof data.enabled === 'boolean') {
+          setWakeWordEnabled(data.enabled)
+          safeSetItem('jarvisWakeWordEnabled', data.enabled.toString())
+        }
+      })
+      .catch(() => { /* backend offline or unverified session */ })
+  }, [pushToast])
 
   useEffect(() => {
-    // Re-sync the persisted wake-word preference to the backend on launch
-    if (safeGetItem('jarvisWakeWordEnabled') === 'false') postVoiceEnabled(false)
+    if (!sessionVerified) return
+    verifiedFetch(`${getApiBase()}/api/voice/enabled`)
+      .then(r => r.json())
+      .then(data => {
+        if (data && typeof data.enabled === 'boolean') {
+          if (safeGetItem('jarvisWakeWordEnabled') === 'false' && data.enabled) {
+            postVoiceEnabled(false)
+          } else {
+            setWakeWordEnabled(data.enabled)
+          }
+        }
+      })
+      .catch(() => {})
+  }, [sessionVerified, postVoiceEnabled])
 
+  useEffect(() => {
     if (window.electronAPI) {
       window.electronAPI.getTheme().then(t => { if (t) setTheme(t) }).catch(() => {})
       window.electronAPI.getAutoLaunch().then(enabled => setAutoLaunch(enabled)).catch(() => {})
@@ -454,9 +491,21 @@ export default function App() {
     }
   }
 
-  // Keyboard navigation shortcuts: Alt+1 = Workspace, Alt+2 = System & Feeds
+  // Keyboard navigation shortcuts: Alt+1 = Workspace, Alt+2 = System & Feeds, Escape = Stop Speaking / Dismiss Settings
   useEffect(() => {
     const handleKeyDown = (e) => {
+      if (e.key === 'Escape') {
+        if (chatRef.current?.isSpeaking) {
+          chatRef.current.stopSpeaking()
+          e.preventDefault()
+          return
+        }
+        if (showSettingsRef.current) {
+          setShowSettings(false)
+          e.preventDefault()
+          return
+        }
+      }
       if (e.altKey && e.key === '1') {
         e.preventDefault()
         setActiveView('workspace')
@@ -491,6 +540,7 @@ export default function App() {
     voiceNote: voiceUI.statusNote,
     onSend: (text) => chat.sendMessage(text, { source: 'chat' }),
     onToggleMute: () => chat.setIsMuted(m => !m),
+    onStopSpeaking: chat.stopSpeaking,
     onAppendMessage: chat.appendMessage,
     onClearHistory: chat.clearHistory,
   }
@@ -517,7 +567,7 @@ export default function App() {
 
               {/* Header */}
               <header className="jarvis-header drag-region flex shrink-0 items-center justify-between p-3 select-none z-50 relative">
-                <div className="flex items-center gap-3">
+                <div className="flex flex-wrap min-w-0 items-center gap-3">
                   <div className="status-dot"></div>
                   <h1 className="text-xl font-bold tracking-widest m-0">V.E.G.A.</h1>
                   <span className="text-xs opacity-70 ml-2">[{health}]</span>
@@ -606,7 +656,7 @@ export default function App() {
                     animate={{ height: 'auto', opacity: 1 }}
                     exit={{ height: 0, opacity: 0 }}
                     transition={{ duration: 0.15, ease: 'easeInOut' }}
-                    className="overflow-hidden border-b border-[var(--border-color)]/30"
+                    className="settings-panel custom-scrollbar border-b border-[var(--border-color)]/30"
                     style={{ backgroundColor: 'rgba(8, 12, 24, 0.98)' }}
                     onAnimationStart={() => { if (showSettings) fetchMicDevices() }}
                   >
@@ -622,7 +672,7 @@ export default function App() {
                       </div>
                       <div className="flex flex-wrap gap-6 items-center">
 
-                        <div className="flex items-center gap-2">
+                        <div className="flex flex-wrap min-w-0 items-center gap-2">
                           <label className="text-sm font-semibold">Theme:</label>
                           <div className="toggle-group">
                             {['sci-fi-hud', 'glass', 'terminal', 'neural-cosmos'].map(t => (
@@ -637,7 +687,7 @@ export default function App() {
                           </div>
                         </div>
 
-                        <div className="flex items-center gap-2">
+                        <div className="flex flex-wrap min-w-0 items-center gap-2">
                           <label className="text-sm font-semibold">LLM Engine:</label>
                           <div className="toggle-group">
                             {['none', 'ollama', 'gemini'].map(p => (
@@ -655,7 +705,7 @@ export default function App() {
                           )}
                         </div>
 
-                        <div className="flex items-center gap-4 border-l border-current/20 pl-4">
+                        <div className="flex flex-wrap items-center gap-4 border-l border-current/20 pl-4">
                           <label className="flex items-center gap-2 text-sm font-semibold cursor-pointer">
                             <input type="checkbox" checked={playSummonSound} onChange={handleToggleSound} className="accent-[var(--accent)]" />
                             Summon Sound

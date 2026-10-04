@@ -37,10 +37,11 @@ export function getBetaPaths(customRoot = null) {
  * Prepares an isolated environment for the beta profile.
  * Strips cloud API keys and injects offline determinism flags.
  */
-export function getBetaEnvironment(customRoot = null, runId = null, baseEnv = process.env) {
+export function getBetaEnvironment(customRoot = null, runId = null, baseEnv = process.env, options = {}) {
   const paths = getBetaPaths(customRoot)
   const actualRunId = runId || `beta-${crypto.randomUUID()}`
   const betaPort = 8005
+  const voiceEnabled = Boolean(options.voice)
 
   const env = {
     ...baseEnv,
@@ -50,8 +51,17 @@ export function getBetaEnvironment(customRoot = null, runId = null, baseEnv = pr
     VEGA_PROFILE_ROOT: paths.betaRoot,
     JARVIS_DB_PATH: paths.betaDbPath,
     LLM_PROVIDER: 'none',
-    VEGA_DISABLE_VOICE: '1',
     VEGA_DISABLE_RADAR: '1',
+  }
+
+  if (voiceEnabled) {
+    env.VEGA_BETA_VOICE = '1'
+    delete env.VEGA_DISABLE_VOICE
+    delete env.VEGA_ENABLE_VOICE
+  } else {
+    env.VEGA_DISABLE_VOICE = '1'
+    delete env.VEGA_BETA_VOICE
+    delete env.VEGA_ENABLE_VOICE
   }
 
   // Discard inherited cloud API keys to guarantee deterministic isolation
@@ -67,6 +77,7 @@ export function getBetaEnvironment(customRoot = null, runId = null, baseEnv = pr
     betaPort,
     betaRoot: paths.betaRoot,
     betaDbPath: paths.betaDbPath,
+    voiceEnabled,
   }
 }
 

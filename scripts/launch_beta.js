@@ -25,7 +25,8 @@ import {
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const rootDir = path.resolve(__dirname, '..')
 
-const { env, runId, betaPort, betaRoot, betaDbPath } = getBetaEnvironment()
+const enableVoice = process.argv.includes('--voice')
+const { env, runId, betaPort, betaRoot, betaDbPath, voiceEnabled } = getBetaEnvironment(null, null, process.env, { voice: enableVoice })
 
 let backendChild = null
 let frontendChild = null
@@ -52,7 +53,8 @@ async function main() {
   console.log(`Run ID:        ${runId}`)
   console.log(`Data Root:     ${betaRoot}`)
   console.log(`Target DB:     ${betaDbPath}`)
-  console.log(`Mode:          Deterministic Offline Only (Cloud & Voice disabled)`)
+  console.log(`Voice Mode:    ${voiceEnabled ? 'Voice acceptance requested' : 'Disabled (Ordinary beta baseline)'}`)
+  console.log(`Mode:          Deterministic Offline Only (Cloud & Radar disabled)`)
   console.log('='.repeat(70))
 
   // 1. Port Availability Check
@@ -109,6 +111,7 @@ async function main() {
   console.log('[VEGA LAUNCHER] Awaiting backend readiness and identity verification...')
   const deadline = Date.now() + 15000 // 15 seconds
   let ready = false
+  let readyProbe = null
 
   while (Date.now() < deadline) {
     if (backendChild.exitCode !== null) {
@@ -119,6 +122,7 @@ async function main() {
     const probe = await probeHealth(betaPort, runId)
     if (probe.ok) {
       ready = true
+      readyProbe = probe
       break
     }
     await sleep(250)
@@ -134,6 +138,15 @@ async function main() {
   }
 
   console.log(`[VEGA LAUNCHER] Backend verified ready! (profile=beta, run_id=${runId})`)
+  if (voiceEnabled) {
+    const vs = readyProbe?.data?.voice_service
+    if (vs?.status === 'ready' || readyProbe?.data?.voice) {
+      console.log(`[VEGA LAUNCHER] Voice acceptance confirmed active: microphone listening (model: ${vs?.wake_word_model || 'hey_jarvis'}).`)
+    } else {
+      const reason = vs?.error || vs?.status || 'Voice service initializing or degraded'
+      console.log(`[VEGA LAUNCHER] Voice acceptance note: ${reason}.`)
+    }
+  }
 
   // 5. Spawn Frontend
   console.log('[VEGA LAUNCHER] Spawning frontend dev server and Electron...')

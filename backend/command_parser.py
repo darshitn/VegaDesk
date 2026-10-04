@@ -98,7 +98,13 @@ def parse_command(text: str, clock):
         return {"type": "intent", "intent": "list_tasks", "params": {"window": _win}}
 
     # ── create task ─────────────────────────────────────────────
-    m = re.match(r"^(?:add|create|make|new)\s+(?:a\s+|new\s+)?(?:task|to-?do)[:\s]+(.+?)[.!?]*$", t, re.IGNORECASE)
+    m = re.match(
+        r"^(?:add|create|make|new)\s+(?:(?:a|the)\s+)?(?:new\s+)?(?:task|to-?do)"
+        r"(?::\s*|\s+(?:to|that|called|named)\s+|\s+)"
+        r"(.+?)[.!?]*$",
+        t,
+        re.IGNORECASE,
+    )
     if m:
         body = m.group(1).strip()
         if not body:
@@ -109,6 +115,8 @@ def parse_command(text: str, clock):
         deadline_utc = when.utc_dt if when.ok else None
         if when.ok:
             body = _strip_when(body, when)
+        else:
+            body = _clean_body(body)
         if not body:
             return {"type": "clarification",
                     "question": "What should the task say? For example: 'Add a task: finish the DBMS assignment by Friday at 6 PM'."}

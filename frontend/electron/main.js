@@ -547,7 +547,7 @@ app.whenReady().then(async () => {
     if (isBeta || !jarvisAutoLauncher) return false
     try {
       return await jarvisAutoLauncher.isEnabled();
-    } catch (e) {
+    } catch {
       return false;
     }
   })

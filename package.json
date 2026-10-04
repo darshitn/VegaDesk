@@ -11,7 +11,8 @@
     "build:backend": "pyinstaller --name jarvis-backend --onefile --distpath dist backend/run.py",
     "build:win": "npm run build:backend && npm run build --prefix frontend && npm run pack --prefix frontend",
     "seed:beta": "node scripts/seed_beta.js",
-    "dev:beta": "node scripts/launch_beta.js"
+    "dev:beta": "node scripts/launch_beta.js",
+    "dev:beta:voice": "node scripts/launch_beta.js --voice"
   },
   "dependencies": {
     "concurrently": "^8.2.2"

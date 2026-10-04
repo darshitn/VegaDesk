@@ -17,6 +17,7 @@ import io
 import os
 import sys
 import wave
+from typing import Any, Optional
 import numpy as np
 
 def _log(msg):
@@ -73,6 +74,95 @@ def is_ducked() -> bool:
         _log("[VOICE] Duck safety-expired; mic re-armed.")
         return False
     return True
+
+
+# Interruption handoff: when wake is detected while ducked, we enter a
+# pending-interruption state. We continue to discard command audio and keep ducking
+# active until the frontend physically cancels TTS and sends an acknowledgement
+# correlated to the interruption ID. A bounded timeout fails closed if no ack arrives.
+_interruption_pending: bool = False
+_current_interruption_id: Optional[str] = None
+_interruption_deadline: float = 0.0
+_interruption_ack_event: threading.Event = threading.Event()
+INTERRUPT_ACK_TIMEOUT: float = 1.5  # seconds: max wait for frontend to cancel TTS and ack
+
+
+def is_interruption_pending() -> bool:
+    global _interruption_pending, _current_interruption_id, _interruption_deadline
+    if not _interruption_pending:
+        return False
+    if time.time() >= _interruption_deadline:
+        _log(f"[VOICE] Interruption {_current_interruption_id!r} timed out waiting for client ack; fail closed.")
+        _interruption_pending = False
+        _current_interruption_id = None
+        _interruption_deadline = 0.0
+        _interruption_ack_event.clear()
+        _enqueue({"type": "status", "text": "Interruption timed out"})
+        return False
+    return True
+
+
+def start_interruption() -> str:
+    """Enter pending-interruption state and emit interrupt wake event."""
+    global _interruption_pending, _current_interruption_id, _interruption_deadline
+    import uuid
+    int_id = str(uuid.uuid4())[:8]
+    _current_interruption_id = int_id
+    _interruption_pending = True
+    _interruption_deadline = time.time() + INTERRUPT_ACK_TIMEOUT
+    _interruption_ack_event.clear()
+    _log(f"[VOICE] Interruption detected while ducked. Entering pending state (id={int_id}).")
+    _enqueue({"type": "wake", "interrupt": True, "interruption_id": int_id})
+    return int_id
+
+
+def acknowledge_interruption(interruption_id: Any) -> bool:
+    """Frontend calls this after cancelling TTS, acknowledging the interruption.
+    Returns True if valid and pending, False if stale, missing, or timed out."""
+    global _interruption_pending, _current_interruption_id, _interruption_deadline
+    req_id = str(interruption_id or "").strip()
+    if not _interruption_pending:
+        _log(f"[VOICE] Received ack for interruption {req_id!r}, but no interruption pending; ignoring.")
+        return False
+    if not _current_interruption_id or req_id != _current_interruption_id:
+        _log(f"[VOICE] Stale or mismatching interruption ack {req_id!r} (expected {_current_interruption_id!r}); ignoring.")
+        return False
+    if time.time() >= _interruption_deadline:
+        _log(f"[VOICE] Interruption ack {req_id!r} arrived after deadline; ignoring.")
+        _interruption_pending = False
+        _current_interruption_id = None
+        _interruption_deadline = 0.0
+        _interruption_ack_event.clear()
+        return False
+
+    _log(f"[VOICE] Interruption {req_id} acknowledged by client. Cancelling ducking and arming recording.")
+    _interruption_pending = False
+    _current_interruption_id = None
+    _interruption_deadline = 0.0
+    set_duck(False)
+    _interruption_ack_event.set()
+    return True
+
+
+def cancel_interruption(reason: str = ""):
+    """Fail closed on disconnect, mic disable, or explicit cancel."""
+    global _interruption_pending, _current_interruption_id, _interruption_deadline
+    if _interruption_pending:
+        _log(f"[VOICE] Cancelled pending interruption ({reason or 'no reason'}).")
+    _interruption_pending = False
+    _current_interruption_id = None
+    _interruption_deadline = 0.0
+    _interruption_ack_event.clear()
+
+
+def get_interruption_state() -> dict:
+    """Introspection for tests and health."""
+    return {
+        "pending": bool(_interruption_pending and time.time() < _interruption_deadline),
+        "interruption_id": _current_interruption_id,
+        "deadline": _interruption_deadline,
+        "ack_set": _interruption_ack_event.is_set(),
+    }
 
 
 def _set_mic_listening(listening: bool, note: str = ""):
@@ -241,6 +331,8 @@ def unregister_client(ws):
     with _lock:
         if ws in _clients:
             _clients.remove(ws)
+            if len(_clients) == 0:
+                cancel_interruption("all clients disconnected")
 
 def _enqueue(event: dict):
     """Thread-safe push into the async event queue."""
@@ -292,6 +384,160 @@ def _is_speech(audio_chunk_np: np.ndarray) -> bool:
     rms = float(np.sqrt(np.mean(audio_chunk_np.astype(np.float64) ** 2)))
     return rms > _speech_energy_threshold
 
+def resolve_wake_word_model() -> Optional[str]:
+    """Resolve local path to hey_jarvis wake word model without downloading."""
+    custom_path = os.getenv("JARVIS_WAKE_MODEL_PATH")
+    if custom_path and os.path.isfile(custom_path) and os.path.getsize(custom_path) > 0:
+        return custom_path
+    try:
+        import openwakeword
+        oww_dir = os.path.dirname(openwakeword.__file__)
+        candidates = [
+            os.path.join(oww_dir, "resources", "models", "hey_jarvis_v0.1.onnx"),
+            os.path.join(oww_dir, "resources", "models", "hey_jarvis.onnx"),
+            os.path.join(oww_dir, "resources", "models", "hey_jarvis_v0.1.tflite"),
+        ]
+        for c in candidates:
+            if os.path.isfile(c) and os.path.getsize(c) > 0:
+                return c
+    except Exception:
+        pass
+    return None
+
+
+def verify_cached_whisper_assets(model_name: str) -> tuple[bool, Optional[str]]:
+    """Verify that required faster-whisper assets exist locally and are non-empty without downloading."""
+    global _whisper_model
+    if _whisper_model is not None:
+        return True, None
+
+    # 1. Custom model path check if configured
+    custom_path = os.getenv("WHISPER_MODEL_PATH")
+    if custom_path:
+        if not os.path.isdir(custom_path):
+            return False, f"Custom Whisper model path not found: {custom_path}"
+        bin_f = os.path.join(custom_path, "model.bin")
+        cfg_f = os.path.join(custom_path, "config.json")
+        has_tok = any(
+            os.path.isfile(os.path.join(custom_path, f)) and os.path.getsize(os.path.join(custom_path, f)) > 0
+            for f in ["vocabulary.txt", "vocabulary.json", "tokenizer.json"]
+        )
+        if os.path.isfile(bin_f) and os.path.getsize(bin_f) > 0 and os.path.isfile(cfg_f) and os.path.getsize(cfg_f) > 0 and has_tok:
+            return True, None
+        return False, "Custom Whisper model directory incomplete: missing or empty model.bin, config.json, or vocabulary"
+
+    # 2. Check HuggingFace hub cache roots
+    cache_roots = []
+    hf_home = os.getenv("HF_HOME") or os.getenv("HUGGINGFACE_HUB_CACHE")
+    if hf_home:
+        cache_roots.extend([hf_home, os.path.join(hf_home, "hub")])
+    cache_roots.extend([
+        os.path.expanduser("~/.cache/huggingface/hub"),
+        os.path.expanduser("~/.cache/huggingface"),
+    ])
+
+    repo_dir_names = [
+        f"models--Systran--faster-whisper-{model_name}",
+        f"models--{model_name.replace('/', '--')}" if "/" in model_name else f"models--{model_name}",
+    ]
+
+    found_repo_dir = None
+    for root in cache_roots:
+        if not os.path.isdir(root):
+            continue
+        for repo_name in repo_dir_names:
+            candidate = os.path.join(root, repo_name)
+            if os.path.isdir(candidate):
+                found_repo_dir = candidate
+                break
+        if found_repo_dir:
+            break
+
+    if not found_repo_dir:
+        return False, f"Whisper model '{model_name}' not cached locally"
+
+    snapshots_dir = os.path.join(found_repo_dir, "snapshots")
+    if not os.path.isdir(snapshots_dir):
+        return False, f"Whisper model '{model_name}' cache incomplete: missing snapshots directory"
+
+    try:
+        snapshots = [
+            os.path.join(snapshots_dir, s)
+            for s in os.listdir(snapshots_dir)
+            if os.path.isdir(os.path.join(snapshots_dir, s))
+        ]
+    except Exception as e:
+        return False, f"Whisper model '{model_name}' snapshot access error: {e}"
+
+    if not snapshots:
+        return False, f"Whisper model '{model_name}' cache incomplete: no snapshot directories found"
+
+    for snap in snapshots:
+        bin_f = os.path.join(snap, "model.bin")
+        cfg_f = os.path.join(snap, "config.json")
+        has_tok = any(
+            os.path.isfile(os.path.join(snap, f)) and os.path.getsize(os.path.join(snap, f)) > 0
+            for f in ["vocabulary.txt", "vocabulary.json", "tokenizer.json"]
+        )
+        if os.path.isfile(bin_f) and os.path.getsize(bin_f) > 0 and os.path.isfile(cfg_f) and os.path.getsize(cfg_f) > 0 and has_tok:
+            return True, None
+
+    return False, f"Whisper model '{model_name}' cache incomplete: missing or empty model.bin, config.json, or vocabulary"
+
+
+def check_voice_readiness() -> dict:
+    """Truthful pre-flight check of installed dependencies and cached assets without network downloads."""
+    report = {
+        "deps_ready": False,
+        "wake_word_ready": False,
+        "whisper_ready": False,
+        "mic_ready": False,
+        "wake_model": None,
+        "whisper_model": os.getenv("WHISPER_MODEL", "small.en"),
+        "mic_device": None,
+        "errors": [],
+    }
+
+    try:
+        import sounddevice as sd
+        import openwakeword
+        from faster_whisper import WhisperModel
+        report["deps_ready"] = True
+    except ImportError as e:
+        report["errors"].append(f"Missing dependency: {getattr(e, 'name', str(e))}")
+        return report
+    except Exception as e:
+        report["errors"].append(f"Dependency error: {e}")
+        return report
+
+    wake_path = resolve_wake_word_model()
+    if wake_path:
+        report["wake_word_ready"] = True
+        report["wake_model"] = os.path.basename(wake_path)
+    else:
+        report["errors"].append("Wake-word model 'hey_jarvis' missing or empty on disk")
+
+    model_name = os.getenv("WHISPER_MODEL", "small.en")
+    is_whisper_ready, whisper_err = verify_cached_whisper_assets(model_name)
+    if is_whisper_ready:
+        report["whisper_ready"] = True
+    else:
+        report["errors"].append(whisper_err or f"Whisper model '{model_name}' not cached locally")
+
+    try:
+        devices = sd.query_devices()
+        input_devs = [d for d in devices if d.get("max_input_channels", 0) > 0]
+        if input_devs:
+            report["mic_ready"] = True
+            report["mic_device"] = input_devs[0].get("name", "Unknown")
+        else:
+            report["errors"].append("No audio input device detected")
+    except Exception as e:
+        report["errors"].append(f"Audio device query error: {e}")
+
+    return report
+
+
 # ──────────────────────────────────────────────
 # Audio capture thread
 # ──────────────────────────────────────────────
@@ -314,10 +560,22 @@ def _audio_thread():
         _set_mic_listening(False, "Voice off (import error)")
         return
 
+    wake_model_path = resolve_wake_word_model()
+    if not wake_model_path:
+        _log("[VOICE] Wake word model 'hey_jarvis' missing or empty on disk. Automatic downloads are disabled.")
+        _set_mic_listening(False, "Voice off (wake model missing)")
+        return
+
+    model_name = os.getenv("WHISPER_MODEL", "small.en")
+    is_whisper_ready, whisper_err = verify_cached_whisper_assets(model_name)
+    if not is_whisper_ready:
+        _log(f"[VOICE] {whisper_err}. Automatic downloads are disabled.")
+        _set_mic_listening(False, "Voice off (whisper model missing or incomplete)")
+        return
+
     try:
-        _log("[VOICE] Downloading/loading openWakeWord 'hey_jarvis' model...")
-        openwakeword.utils.download_models(["hey_jarvis"])
-        oww = OWWModel(wakeword_models=["hey_jarvis"], inference_framework="onnx")
+        _log(f"[VOICE] Loading local openWakeWord model from '{wake_model_path}'...")
+        oww = OWWModel(wakeword_models=[wake_model_path], inference_framework="onnx" if wake_model_path.endswith(".onnx") else "tflite")
         _log("[VOICE] Wake word model loaded. Listening for 'Hey Jarvis'...")
     except Exception as e:
         _log(f"[VOICE] Failed to load wake word model: {e}")
@@ -407,24 +665,83 @@ def _audio_thread():
                     if not _enabled.is_set():
                         break  # closes the stream via the with-block
                     try:
-                        audio = audio_q.get(timeout=1.0)
+                        audio = audio_q.get(timeout=0.2)
                     except queue.Empty:
+                        # Check pending interruption timeout even during queue empty
+                        if is_interruption_pending():
+                            pass
                         continue
 
+                    # ── State 1: Acknowledged interruption transition ──
+                    if _interruption_ack_event.is_set():
+                        _interruption_ack_event.clear()
+                        # Discard all queued pre-acknowledgement audio chunks!
+                        # Any audio that arrived between the wake word and the frontend's
+                        # TTS cancellation ack may contain speaker audio. Drop it completely.
+                        while not audio_q.empty():
+                            try:
+                                audio_q.get_nowait()
+                            except Exception:
+                                break
+                        recorded_frames = []
+                        vad_buffer = np.zeros(0, dtype=np.float32)
+                        if _vad_model is not None and hasattr(_vad_model, "reset_states"):
+                            try:
+                                _vad_model.reset_states()
+                            except Exception:
+                                pass
+                        recording = True
+                        silence_start = 0.0
+                        record_start = time.time()
+                        _enqueue({"type": "listening"})
+                        _log("[VOICE] Clean command recording armed after verified interrupt ack.")
+                        continue
+
+                    # ── State 2: Pending interruption (waiting for client ack) ──
+                    if is_interruption_pending():
+                        # We detected 'Hey Jarvis' during TTS and notified frontend.
+                        # While waiting for frontend to cancel TTS and acknowledge,
+                        # continue discarding all incoming audio so speaker audio
+                        # is never accumulated into command buffers.
+                        continue
+
+                    # ── State 3: Normal ducking (VEGA is speaking, no interrupt yet) ──
                     if is_ducked():
-                        # VEGA is speaking: never wake on its own voice, drop any
-                        # recording already in progress (it can only contain VEGA),
-                        # and reset the model buffer so a wake right after speech
-                        # needs a fresh user utterance.
+                        # If a recording was in progress when ducking began,
+                        # drop it immediately so VEGA speech is never captured.
                         if recording:
                             recording = False
                             recorded_frames = []
                             vad_buffer = np.zeros(0, dtype=np.float32)
-                            _log("[VOICE] Dropped in-progress recording (VEGA was speaking).")
+                            _log("[VOICE] Dropped in-progress recording (VEGA is speaking).")
+
+                        # While VEGA is speaking: keep ordinary speech capture suppressed.
+                        # However, allow bounded wake-word detection for interruption:
+                        # if the owner says "Hey Jarvis", enter pending-interruption state.
+                        audio_int16 = (audio * 32767).astype(np.int16)
                         try:
+                            oww.predict(audio_int16)
+                        except Exception as e:
+                            err_key = repr(e)[:150]
+                            if err_key not in _logged_predict_errors:
+                                _logged_predict_errors.add(err_key)
+                                _log(f"[VOICE] Wake model predict during ducking failed: {err_key}")
+                            continue
+
+                        if wake_fired(oww.prediction_buffer, WAKE_THRESHOLD):
+                            _log("[VOICE] Spoken interruption detected: 'Hey Jarvis' during speech playback.")
                             oww.reset()
-                        except Exception:
-                            pass
+                            # Enter pending-interruption state:
+                            # Do NOT un-duck yet! Do NOT start recording yet!
+                            start_interruption()
+                            # Purge audio queue and buffers
+                            while not audio_q.empty():
+                                try:
+                                    audio_q.get_nowait()
+                                except Exception:
+                                    break
+                            recorded_frames = []
+                            vad_buffer = np.zeros(0, dtype=np.float32)
                         continue
 
                     if not recording:
@@ -537,24 +854,26 @@ def _get_whisper():
     global _whisper_model
     if _whisper_model is None:
         from faster_whisper import WhisperModel
-        # small.en: ~3% WER on clean speech (vs ~6-8% for base) — the accuracy
-        # tier worth the extra CPU. Override with WHISPER_MODEL=base.en (faster)
-        # or tiny.en (fastest) if latency matters more than accuracy.
         model_name = os.getenv("WHISPER_MODEL", "small.en")
-        _log(f"[VOICE] Loading faster-whisper '{model_name}' model...")
-        _whisper_model = WhisperModel(model_name, device="cpu", compute_type="int8")
-        _log("[VOICE] Whisper model loaded.")
+        is_ready, err = verify_cached_whisper_assets(model_name)
+        if not is_ready:
+            raise RuntimeError(err or f"Whisper model '{model_name}' incomplete or missing from cache")
+        _log(f"[VOICE] Loading local faster-whisper '{model_name}' model (local_files_only=True)...")
+        _whisper_model = WhisperModel(model_name, device="cpu", compute_type="int8", local_files_only=True)
+        _log("[VOICE] Whisper model loaded from local cache.")
     return _whisper_model
 
 def _preload_whisper():
     """Load Whisper in the background so the first wake-word command doesn't
     pay the cold-load cost (~2s+) while the user waits."""
+    global _voice_error
     try:
         t0 = time.time()
         _get_whisper()
         _log(f"[VOICE] Whisper preloaded in {time.time()-t0:.1f}s.")
     except Exception as e:
-        _log(f"[VOICE] Whisper preload failed (will retry on first transcription): {e}")
+        _voice_error = f"Whisper load failed: {e}"
+        _log(f"[VOICE] Whisper preload failed: {e}")
 
 def transcribe_source(src):
     """Transcribe an audio source (file path or file-like) with VEGA's guarded
@@ -663,6 +982,25 @@ def is_voice_active() -> bool:
     return bool(_voice_active)
 
 
+def is_enabled() -> bool:
+    return _enabled.is_set()
+
+
+def set_voice_enabled(enabled: bool):
+    """Enable or disable wake-word listening.
+    Disabling releases the microphone InputStream immediately."""
+    global _voice_active, _voice_error
+    if enabled:
+        _enabled.set()
+        _voice_error = ""
+        _log("[VOICE] Wake-word listening enabled.")
+    else:
+        _enabled.clear()
+        cancel_interruption("voice disabled by user")
+        _set_mic_listening(False, "Voice disabled by user")
+        _log("[VOICE] Wake-word listening disabled.")
+
+
 def _sanitize_voice_error(err: Any) -> Optional[str]:
     if err is None:
         return None
@@ -670,14 +1008,18 @@ def _sanitize_voice_error(err: Any) -> Optional[str]:
     if not err_str:
         return None
     import re
+    err_lower = err_str.lower()
+    if "disabled by user" in err_lower:
+        return None
+    if "wake word model" in err_lower or "wake model" in err_lower:
+        return "Wake word model missing on disk"
+    if "whisper" in err_lower and ("not cached" in err_lower or "not found" in err_lower or "load failed" in err_lower or "incomplete" in err_lower):
+        return "Whisper model not cached or incomplete on disk"
+    if "no microphone" in err_lower or "no input" in err_lower or "device" in err_lower:
+        return "Microphone unavailable"
     # If the error string contains paths, strip to safe reason
     if re.search(r"[A-Za-z]:[\\/]|/(?:Users|home|root|tmp)/", err_str):
         return "Audio hardware unavailable"
-    err_lower = err_str.lower()
-    if "no microphone" in err_lower or "no input" in err_lower or "device" in err_lower:
-        return "Microphone unavailable"
-    if "disabled by user" in err_lower:
-        return None
     # Strip any potential tokens/secrets
     err_str = re.sub(r"(AIza[0-9A-Za-z-_]{35})", "<redacted>", err_str)
     err_str = re.sub(r"(sk-[0-9A-Za-z]{20,})", "<redacted>", err_str)
@@ -688,12 +1030,27 @@ def _sanitize_voice_error(err: Any) -> Optional[str]:
 def get_status() -> dict:
     disabled = os.getenv("VEGA_DISABLE_VOICE", "").strip() in ("1", "true", "yes")
     user_disabled = not _enabled.is_set()
-    if disabled or user_disabled:
+    model_name = os.getenv("WHISPER_MODEL", "small.en")
+    wake_model_path = resolve_wake_word_model()
+    wake_model_name = os.path.basename(wake_model_path) if wake_model_path else None
+
+    if disabled:
         return {
             "status": "disabled",
             "active": False,
-            "enabled": False if disabled else _enabled.is_set(),
+            "enabled": False,
+            "wake_word_model": wake_model_name,
+            "whisper_model": model_name,
             "error": None,
+        }
+    if user_disabled:
+        return {
+            "status": "disabled",
+            "active": False,
+            "enabled": False,
+            "wake_word_model": wake_model_name,
+            "whisper_model": model_name,
+            "error": "Voice disabled by user",
         }
     if _voice_error:
         safe_err = _sanitize_voice_error(_voice_error)
@@ -701,6 +1058,8 @@ def get_status() -> dict:
             "status": "unavailable",
             "active": False,
             "enabled": _enabled.is_set(),
+            "wake_word_model": wake_model_name,
+            "whisper_model": model_name,
             "error": safe_err,
         }
     if _voice_active:
@@ -708,6 +1067,8 @@ def get_status() -> dict:
             "status": "ready",
             "active": True,
             "enabled": True,
+            "wake_word_model": wake_model_name,
+            "whisper_model": model_name,
             "error": None,
         }
     # Voice is enabled, not active, no error yet:
@@ -718,5 +1079,7 @@ def get_status() -> dict:
         "status": status,
         "active": False,
         "enabled": True,
+        "wake_word_model": wake_model_name,
+        "whisper_model": model_name,
         "error": None,
     }

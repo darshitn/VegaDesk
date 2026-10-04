@@ -3,6 +3,7 @@ import { Calendar, CheckCircle2, Circle, ListTodo, Plus, Trash2, PenTool, Timer 
 import { createFreshnessTracker } from '../lib/freshnessTracker'
 import { createMutationGuard } from '../lib/mutationGuard'
 import { getApiBase, verifiedFetch } from '../lib/apiConfig'
+import { subscribeProductivityUpdates } from '../lib/productivityUpdates'
 
 const API = getApiBase()
 
@@ -48,7 +49,8 @@ export default function ProductivityHub() {
   const [banner, setBanner] = useState(null) // { kind: 'error'|'info', text }
 
   // Quick-add forms
-  const [timerMinutes, setTimerMinutes] = useState('25')
+  const [timerAmount, setTimerAmount] = useState('25')
+  const [timerUnit, setTimerUnit] = useState('minutes')
   const [reminderText, setReminderText] = useState('')
   const [reminderWhen, setReminderWhen] = useState('') // datetime-local value
   const [focusMinutes, setFocusMinutes] = useState('45')
@@ -214,6 +216,8 @@ export default function ProductivityHub() {
     fetchCoursework()
   }, [fetchTasks, fetchHub, fetchProjects, fetchToday, fetchCoursework])
 
+  useEffect(() => subscribeProductivityUpdates(refresh), [refresh])
+
   useEffect(() => {
     fetchTasks()
     fetchNotes()
@@ -316,18 +320,26 @@ export default function ProductivityHub() {
   // ── Timers ─────────────────────────────────────────────
   const addTimer = async (e) => {
     e.preventDefault()
-    const mins = parseInt(timerMinutes, 10)
-    if (!mins || mins < 1) { flash('error', 'Enter a timer length in minutes.'); return }
+    const amount = Number(timerAmount)
+    const durationSeconds = amount * (timerUnit === 'seconds' ? 1 : 60)
+    if (!Number.isInteger(amount) || amount < 1 || durationSeconds > 86400) {
+      flash('error', 'Enter a whole-number duration between 1 second and 24 hours.')
+      return
+    }
     if (isStartingTimer) return
     setIsStartingTimer(true)
     try {
       const res = await verifiedFetch(`${API}/api/timers`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ duration_seconds: mins * 60, label: `${mins}m timer` })
+        body: JSON.stringify({
+          duration_seconds: durationSeconds,
+          label: `${amount}${timerUnit === 'seconds' ? 's' : 'm'} timer`,
+        })
       })
       if (!res.ok) throw new Error(`HTTP ${res.status}`)
-      setTimerMinutes('25')
+      setTimerAmount('25')
+      setTimerUnit('minutes')
       refresh()
     } catch (err) {
       console.error('Failed to start timer', err)
@@ -683,33 +695,33 @@ export default function ProductivityHub() {
   return (
     <div className="flex flex-col w-full mx-auto rounded-lg border border-current/20 bg-black/10 backdrop-blur-sm overflow-hidden shadow-inner mt-0">
       {/* Header / Strip */}
-      <div className="flex items-center justify-between p-3 border-b border-current/20 bg-black/20">
-        <div className="flex items-center gap-3">
-          <div className="flex items-center gap-2">
+      <div className="flex flex-wrap items-center justify-between gap-2 p-3 border-b border-current/20 bg-black/20">
+        <div className="flex flex-wrap min-w-0 items-center gap-3">
+          <div className="flex items-center gap-2 shrink-0">
             <ListTodo size={16} className="text-[var(--accent)]" />
             <span className="text-sm font-semibold tracking-wider">PRODUCTIVITY HUB</span>
           </div>
           <div className="hidden sm:block h-4 w-px bg-current opacity-20"></div>
-          <span className="hidden sm:block text-xs font-bold text-[var(--accent)]">{openTasksCount} Open Tasks</span>
+          <span className="text-xs font-bold text-[var(--accent)] whitespace-nowrap">{openTasksCount} Open Tasks</span>
           {(freshness.tasks.isStale || freshness.hub.isStale || freshness.today.isStale || freshness.projects.isStale || freshness.coursework.isStale) && (
             <span className="text-[10px] bg-amber-500/20 text-amber-300 border border-amber-500/30 px-1.5 py-0.5 rounded tracking-wide font-medium">
               Stale (cached)
             </span>
           )}
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex flex-1 min-w-0 items-center justify-end gap-2">
           <button
             onClick={refresh}
             disabled={freshness.tasks.loading || freshness.hub.loading}
-            className="p-1 text-xs opacity-70 hover:opacity-100 disabled:opacity-30 rounded hover:bg-white/10 transition-colors"
+            className="p-1 shrink-0 text-xs opacity-70 hover:opacity-100 disabled:opacity-30 rounded hover:bg-white/10 transition-colors"
             title="Refresh hub data"
             aria-label="Refresh hub data"
           >
             <RefreshCw size={13} className={freshness.tasks.loading || freshness.hub.loading ? 'animate-spin' : ''} />
           </button>
-          <div className="flex items-center gap-2 opacity-60">
-            <Calendar size={14} />
-            <span className="text-[10px] sm:text-xs uppercase tracking-wider truncate">{hub.timezone || 'Local time'}</span>
+          <div className="flex min-w-0 items-center gap-2 opacity-60">
+            <Calendar size={14} className="shrink-0" />
+            <span className="max-w-[16rem] text-[10px] sm:text-xs uppercase tracking-wider truncate" title={hub.timezone || 'Local time'}>{hub.timezone || 'Local time'}</span>
           </div>
         </div>
       </div>
@@ -748,7 +760,7 @@ export default function ProductivityHub() {
       ) : null}
 
       {/* Active-now cards: timers, next reminder, focus */}
-      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 p-3 border-b border-current/20">
+      <div className="hub-active-cards p-3 border-b border-current/20">
         {/* Timers */}
         <div className="bg-black/20 rounded-lg border border-current/10 p-3 flex flex-col gap-2">
           <h4 className="text-[10px] uppercase tracking-widest opacity-70 flex items-center justify-between">
@@ -775,13 +787,23 @@ export default function ProductivityHub() {
               </div>
             )
           })}
-          <form onSubmit={addTimer} className="flex gap-1 mt-auto">
+          <form onSubmit={addTimer} className="timer-form mt-auto">
             <input
-              type="number" min="1" max="1440" value={timerMinutes}
-              onChange={(e) => setTimerMinutes(e.target.value)}
-              className="w-full bg-black/30 border border-current/20 text-xs p-1.5 outline-none font-inherit"
-              placeholder="min"
+              type="number" min="1" max={timerUnit === 'seconds' ? 86400 : 1440}
+              step="1" required value={timerAmount}
+              onChange={(e) => setTimerAmount(e.target.value)}
+              className="w-full min-w-0 bg-black/30 border border-current/20 text-xs p-1.5 outline-none font-inherit"
+              placeholder="Duration" aria-label="Timer duration"
             />
+            <select
+              value={timerUnit}
+              onChange={(e) => setTimerUnit(e.target.value)}
+              aria-label="Timer unit"
+              className="bg-black/30 border border-current/20 text-xs p-1.5 font-inherit shrink-0"
+            >
+              <option value="minutes">Minutes</option>
+              <option value="seconds">Seconds</option>
+            </select>
             <button
               type="submit"
               disabled={isStartingTimer}
@@ -826,7 +848,7 @@ export default function ProductivityHub() {
               <input
                 type="datetime-local" value={reminderWhen}
                 onChange={(e) => setReminderWhen(e.target.value)}
-                className="w-full bg-black/30 border border-current/20 text-[10px] p-1 outline-none font-inherit"
+                className="w-full min-w-0 bg-black/30 border border-current/20 text-[10px] p-1 outline-none font-inherit"
               />
               <button
                 type="submit"
@@ -908,7 +930,7 @@ export default function ProductivityHub() {
         </div>
 
         {/* Today strip: next actions + due soon */}
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs mb-2">
+        <div className="hub-summary-grid gap-2 text-xs mb-2">
           <div className="bg-black/20 rounded border border-current/10 p-2">
             <div className="text-[10px] uppercase tracking-wider opacity-60 mb-1">Next actions</div>
             {(today.next_actions || []).length === 0 && (
@@ -1197,7 +1219,7 @@ export default function ProductivityHub() {
 
       {/* Main Two Columns — content-sized so rows are never clipped by a
           fixed-height ancestor; the dashboard column scrolls to reveal them. */}
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4 p-4">
+      <div className="hub-summary-grid gap-4 p-4">
 
         {/* Tasks Column */}
         <div className="flex flex-col min-h-[280px] bg-black/20 rounded-lg border border-current/10 p-3">

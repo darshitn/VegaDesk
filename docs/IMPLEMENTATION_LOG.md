@@ -1275,3 +1275,332 @@ Addressed the defect documented in `docs/ANTIGRAVITY_BETA_TIMEOUT_FIX.md`:
 Reviewed production verifier/poller and the new timeout/recovery regression. Current active timeout revokes verification, publishes subscriber state, blocks mutations, and allows matching recovery; explicit stopped/superseded probes remain discarded. npm test --prefix frontend independently passed: 63 tests, 0 failed in 822.50ms. npm run lint --prefix frontend: 0 errors, 21 warnings. git -c core.safecrlf=false diff --check passed. No backend changes for this fix; full reported 425-test backend result was not rerun.
 
 The previously reproduced timeout failure is resolved in the tested production helper path. Next step is the owner-supervised source beta walkthrough in docs/BETA_ACCEPTANCE_CHECKLIST.md, beginning with profile badge/health, task create-complete-delete, restart persistence, timer notifications, and clean teardown. Actual Electron windows, Windows notifications, scaling/audio and old packaged binaries remain unverified. No real GUI/backend service/microphone/model/installer or personal data accessed during review. No new implementation milestone is required for the reviewed fix before beginning supervised acceptance.
+
+## 2026-10-04 — Owner beta feedback: timers shorter than one minute
+
+Baseline: main, HEAD edac798, clean tracked working state before this fix. Changed only frontend/src/components/ProductivityHub.jsx and this log. Timer form now offers Seconds/Minutes with an integer duration, translates to the existing duration_seconds API, and enforces 1 second through 24 hours. Keeps the default/reset at 25 minutes, verifiedFetch authorization, pending submission handling, and input/unit preservation on request failure. Focus duration unchanged.
+
+Verification: npm test --prefix frontend passed; npm run lint --prefix frontend completed with warnings and no errors; git -c core.safecrlf=false diff --check passed. Python 3.14 guard-only parser check (no database/network): parse_command('timer 15s', SystemClock()) returned start_timer duration_seconds=15; parse_command('set a timer for 30 seconds', SystemClock()) returned 30. A bounded read-only reviewer confirmed existing backend TimerCreate/start_timer bounds 1..86400, so no backend changes or full backend rerun were needed.
+
+Boundary: no real timer created, no desktop countdown/notification observed, no personal data/.env/build outputs changed. Next owner check: in Timers choose Seconds, enter 15, press +, observe countdown and notification. Running Vite development session should pick up the source edit; old packaged artifact remains unchanged.
+
+## 2026-10-04 — Owner beta feedback: windowed layout correction
+
+Preserved main/edac798 and existing seconds-timer edits. Screenshot showed compressed timer controls and clipped Hub header in the Glass theme at windowed size. Updated index.css, ProductivityHub.jsx, App.jsx, and AIBrain.jsx: Hub active cards and summary grids now size to their own available column width with auto-fit minimums; timer input has a usable minimum width; Hub/chat/global headings wrap; long timezone label is bounded with full-value tooltip; reminder datetime input can shrink; workspace tracks use minmax(0,...); Settings has bounded height and scrolling, and settings toggles wrap.
+
+Verification: npm test --prefix frontend passed; npm run lint --prefix frontend completed with warnings and no errors; git -c core.safecrlf=false diff --check passed. Bounded read-only reviewer confirmed viewport-based sm:grid-cols-3 inside a narrow Hub was the source cause. Existing .env, databases, credentials and build outputs preserved. No backend changes, full backend rerun, new timers, or personal-data fixtures.
+
+Visual boundary: reviewed owner screenshot and source; computer-use window discovery returned no available VEGA window, so no post-change desktop screenshot/resize verification was possible. Owner next: restore a smaller window, open Settings, verify timer controls and headings are readable, then task restart persistence and visible/hidden notifications. Local conversational AI is the next separate milestone after those acceptance checks; beta still intentionally enforces deterministic mode.
+
+## 2026-10-04 — Owner beta feedback: readable spoken replies
+
+Small frontend-only correction. Added frontend/src/lib/speechText.js and used prepareSpeechText in useChat's single speech path. Spoken replies omit duplicate parenthesized/bracketed ISO timestamp annotations and known inline system/offline labels; Markdown links speak their label. Meaningful parenthetical/bracketed prose and warning/refusal wording remain readable. Existing code-fence/structured-object skipping preserved. Displayed chat messages, stored history, backend receipts, timer data, and existing mute/duck behavior unchanged.
+
+Verification: node --test frontend/tests/speechText.test.js: 7 passed. npm test --prefix frontend passed with the additional speech regressions; npm run lint --prefix frontend completed with warnings and no errors; git -c core.safecrlf=false diff --check passed. Tests cover the owner timer reply, reminder/focus offset timestamps, status/error wording, meaningful brackets, Markdown links/code fences, bare timestamps, and empty/non-string content. Read-only reviewer confirmed the shared speakText integration and recommended preserving ordinary bracket content. Backend unchanged; no full backend rerun needed.
+
+Boundary: text formatting tests only, no actual speech/audio playback, microphone, provider calls, live timer creation, or personal data access. Earlier timer/layout edits preserved. Owner next: send Set a timer for 15 seconds and listen for the readable confirmation without the duplicate ISO annotation.
+
+## 2026-10-04 — Owner preference: concise timer speech
+
+Updated speechText.js so canonical successful relative timer confirmations speak only Timer set for <duration>. No timer ID, readable end date/time, or machine timestamp is spoken. Full displayed reply and backend evidence remain intact. Errors/refusals continue to be spoken truthfully. Updated existing timer regression and added duration/error cases: node --test frontend/tests/speechText.test.js passed 8 tests. git -c core.safecrlf=false diff --check passed. No backend/data/build changes or audio playback.
+
+## 2026-10-04 — Owner beta feedback: chat task list refresh
+
+Baseline main/edac798; preserved all existing dirty timer/layout/speech changes. Cause: useChat consumed the successful /chat response but ignored its receipt; Hub loaded tasks on mount/manual mutations while its interval refreshed only hub/today. Added frontend/src/lib/productivityUpdates.js: successful, non-read-only productivity receipts notify mounted subscribers. useChat publishes after parsing a successful response for both chat and voice. ProductivityHub subscribes its existing refresh callback with effect cleanup, reloading tasks/hub/projects/today/coursework while preserving note drafts and task filters. Failed/clarification/prose-only/read-only/app-launch responses do not trigger refresh; successful replay receipts do. A subscriber exception cannot misreport a committed action as a chat failure.
+
+Verification: node --test frontend/tests/productivityUpdates.test.js: 3 passed; npm test --prefix frontend: 74 passed, 0 failed; npm run lint --prefix frontend: exit 0, warnings remain; git -c core.safecrlf=false diff --check: passed. Synthetic subscriber/list fixtures cover chat and voice creation, replay without duplicate writes, denied/malformed/unrelated responses, unsubscribe and subscriber failure isolation. Bounded read-only reviewer confirmed both deterministic and model /chat routes carry executor receipts and the refresh callback excludes editable notes. Backend unchanged; no backend suite rerun. No live desktop task, microphone, provider, personal database, .env or build output touched.
+
+Next owner check: keep Task Matrix on All or Open, send Add a task to review sorting algorithms in chat (then voice), and verify the task appears immediately after confirmation without adding another task manually. Live React/desktop rendering remains owner verification.
+
+---
+
+## 2026-10-04 — Opt-In Voice Acceptance in Isolated Beta Profile
+
+### 1. Scope, Baseline, and Preservation
+- **Milestone**: Bounded opt-in voice acceptance in the isolated synthetic beta profile.
+- **Git Baseline**: `main` with preserved existing changes (seconds timer, layout polish, speechText, productivityUpdates).
+- **Personal Data Preservation**: Personal SQLite database (`backend/jarvis.db`), backups, WAL files, personal `.env`, and builds strictly preserved and uninspected.
+- **Strict Isolation Guarantees**:
+  - Ordinary beta profile (`npm run dev:beta`) keeps the microphone completely closed and listening disabled by default (`VEGA_DISABLE_VOICE=1`).
+  - Opt-in voice test mode (`npm run dev:beta:voice`) uses the exact same isolated beta profile (`VEGA_PROFILE=beta`), port `8005`, and synthetic database (`%APPDATA%\Jarvis_Dashboard_Beta\db\jarvis-beta.db`).
+  - Zero cloud leakage: `LLM_PROVIDER="none"` remains forced; cloud API keys (`GEMINI_API_KEY`, etc.) are stripped from process memory on launch. All voice commands resolve deterministically offline at ₹0 cost.
+  - Zero automatic network downloads: wake-word models and Whisper weights are resolved exclusively from local disk; missing models or dependencies are reported truthfully without triggering downloads.
+
+### 2. Architecture & Implementation Decisions
+1. **Launcher Opt-In & Environment Contract**:
+   - `scripts/launcherHelpers.js`: Updated `getBetaEnvironment` with `options.voice`. When enabled, sets `VEGA_BETA_VOICE='1'` and removes `VEGA_DISABLE_VOICE`. Inherited cloud keys remain stripped in both modes.
+   - `scripts/launch_beta.js`: Added `--voice` command-line argument and updated launcher banner logging.
+   - `package.json`: Added `"dev:beta:voice": "node scripts/launch_beta.js --voice"`.
+2. **Backend Voice Mode Control & Truthful Readiness**:
+   - `backend/main.py`:
+     - In beta profile, voice is disabled by default unless `VEGA_BETA_VOICE=1` or `VEGA_ENABLE_VOICE=1` is set.
+     - `GET /health` reports `voice_test_mode` (boolean).
+     - `GET /api/voice/enabled` and `GET /api/voice/readiness` report truthful backend state, model names, and dependency readiness.
+     - `POST /api/voice/enabled` rejects activation when the profile was launched in voice-disabled mode, returning an actionable error message directing the owner to `npm run dev:beta:voice`.
+3. **Local Offline Model Resolution & Dependency Checks**:
+   - `backend/voice_service.py`:
+     - Added `resolve_wake_word_model()`: resolves local `hey_jarvis` model on disk (or `JARVIS_WAKE_MODEL_PATH`) without downloading.
+     - Added `check_voice_readiness()`: checks sounddevice, openWakeWord, cached faster-whisper model in HuggingFace cache directory, and audio input devices.
+     - Replaced automatic model download in `_audio_thread` with local resolution; if missing, reports `Voice off (wake model missing)`.
+     - In `_get_whisper()`, passed `local_files_only=True` to `WhisperModel`, ensuring no HuggingFace downloads occur.
+4. **Microphone Stream Closure on Listening Disable**:
+   - `backend/voice_service.py`: Added `is_enabled()` and `set_voice_enabled(bool)`.
+   - When listening is toggled off (`set_voice_enabled(False)`), `_enabled.clear()` causes the audio thread to break the inner capture loop, cleanly exiting the `with sd.InputStream(...)` context manager and releasing the PortAudio microphone stream.
+   - Broadcasts `{"type": "mic", "listening": false, "note": "Voice disabled by user"}` to connected WebSocket clients.
+   - Preserved speech ducking (`set_duck(True/False)` and `is_ducked()`): resets openWakeWord model prediction buffer and drops in-flight captured audio while VEGA is speaking, preventing self-triggering feedback loops.
+5. **Frontend State Synchronization & Honest Feedback**:
+   - `frontend/src/App.jsx`:
+     - On session verification, queries `GET /api/voice/enabled` and syncs `wakeWordEnabled` to actual backend state.
+     - If user toggles Wake Word in voice-disabled mode, backend rejection surfaces a warning toast and rolls back the toggle.
+     - Handles `/ws/voice` transcript events through `dispatchTranscript` -> `sendMessage(text, { source: 'voice' })` into the verified action pipeline.
+   - `frontend/src/components/AIBrain.jsx`:
+     - Cognitive Core header displays truthful status: green dot with `Wake word active` when listening, and `(voiceNote || 'Voice offline')` when offline or disabled.
+
+### 3. Automated Test Verification
+- **Backend Targeted Tests (`pytest`)**:
+  - `python -m pytest backend/tests/test_beta_voice.py -v` -> **5 passed** in 20.14s.
+    - `test_beta_default_disables_voice`: ordinary beta profile disables voice, reports `voice_test_mode=False`, and rejects POST toggle.
+    - `test_beta_opt_in_voice_mode`: `VEGA_BETA_VOICE=1` enables voice, reports `voice_test_mode=True`, preserves zero cloud keys, and permits toggle.
+    - `test_local_wake_word_resolution_no_download`: resolves local wake model without network requests.
+    - `test_voice_readiness_reporting`: reports truthful hardware and cache readiness.
+    - `test_voice_listening_toggle_and_ducking`: tests enabled/disabled lifecycle and speech ducking safety deadline.
+  - `python -m pytest backend/tests/test_beta_profile.py -v` -> **10 passed** in 10.30s.
+- **Frontend Automated Tests (`node --test`)**:
+  - `npm test --prefix frontend` -> **74 passed** in 806ms (including launcher voice opt-in tests).
+- **Frontend Linter (`oxlint`)**:
+  - `npm run lint --prefix frontend` -> **0 errors**, 20 warnings.
+- **Formatting & Whitespace**:
+  - `git -c core.safecrlf=false diff --check` -> **0 errors**.
+
+### 4. Hermetic Test & Evidence Boundaries
+- **Synthetic Isolation**: Automated tests evaluated backend endpoints using FastAPI TestClient and isolated temporary SQLite files.
+- **Personal Data Preservation**: Personal database `backend/jarvis.db`, its WAL files, and personal `.env` were strictly preserved and uninspected.
+- **Desktop Acceptance Boundary**: No real microphone audio capture, live acoustic wake-word utterance ("Hey Jarvis"), or local Whisper audio decoding was executed during automated testing. Row PTT-01 in `docs/BETA_ACCEPTANCE_CHECKLIST.md` remains `NOT RUN` pending the owner's supervised desktop verification.
+
+### 5. Supervised Owner Verification Commands
+1. **Ordinary Beta Baseline (Verify Mic Disabled)**:
+   ```powershell
+   npm run dev:beta
+   ```
+   - In Settings, observe that Wake Word is unchecked.
+   - Click Wake Word toggle: observe warning toast indicating voice is disabled in ordinary beta profile, and toggle reverts to unchecked.
+   - Header shows red indicator: `Voice disabled in current profile`.
+   - Teardown: close window / exit via tray Quit.
+
+2. **Opt-In Voice Acceptance Mode**:
+   ```powershell
+   npm run dev:beta:voice
+   ```
+   - Terminal banner reports: `Voice Mode: Voice acceptance requested`.
+   - Backend probe confirms: `Voice acceptance confirmed active: microphone listening`.
+   - Cognitive Core header displays green indicator: `Wake word active`.
+   - Clearly say: *"Hey Jarvis"* -> observe wake detection -> speak command: *"Set a timer for 15 seconds"* -> observe transcript -> action receipt executed -> timer countdown begins.
+   - Open Settings and uncheck Wake Word: observe header changes to `Voice disabled by user`, and microphone stream is closed.
+
+---
+
+## 2026-10-04 — Beta Voice Defaults and Truthful Asset Readiness Correction
+
+### 1. Scope, Invariants, and Preservation
+- Corrected beta voice defaults and asset readiness presentation per owner directives:
+  1. Required the explicit `--voice` CLI flag in the launcher to activate beta voice. Inherited environment variables (`VEGA_BETA_VOICE`, `VEGA_ENABLE_VOICE`) cannot enable voice in ordinary `npm run dev:beta`.
+  2. Changed the launcher startup banner to display `"Voice Mode: Voice acceptance requested"` until runtime `/health` probe confirms active microphone readiness.
+  3. Replaced directory-existence check for faster-whisper with strict asset verification: an existing cache folder alone does not imply usability. Checks for valid snapshots containing non-empty `model.bin`, `config.json`, and vocabulary/tokenizer assets (`verify_cached_whisper_assets`).
+  4. Enforced `os.path.getsize(c) > 0` on local wake-word model paths to reject empty dummy files.
+- Preserved existing changes, personal databases (`backend/jarvis.db`), `.env`, and builds.
+
+### 2. Architecture & Design Corrections
+- **`scripts/launcherHelpers.js`**: `getBetaEnvironment` now derives `voiceEnabled = Boolean(options.voice)`. When `options.voice` is false (ordinary `npm run dev:beta`), both `VEGA_BETA_VOICE` and `VEGA_ENABLE_VOICE` are explicitly scrubbed and `VEGA_DISABLE_VOICE = '1'` is set, preventing shell environment leakage from enabling voice.
+- **`scripts/launch_beta.js`**:
+  - `enableVoice` checks strictly `process.argv.includes('--voice')`.
+  - Banner prints `Voice Mode: Voice acceptance requested`.
+  - Once `probeHealth` succeeds, logs truthful readiness: `[VEGA LAUNCHER] Voice acceptance confirmed active: microphone listening` (or descriptive readiness note).
+- **`backend/main.py`**:
+  - In beta profile initialization, explicitly scrubs `VEGA_ENABLE_VOICE` from `os.environ`.
+  - Evaluates `beta_voice_opt_in` strictly against `VEGA_BETA_VOICE == '1'`.
+- **`backend/voice_service.py`**:
+  - Added `verify_cached_whisper_assets(model_name)`: validates that a HuggingFace hub cache or custom path possesses a valid `snapshots/` folder containing non-empty `model.bin`, `config.json`, and vocabulary/tokenizer files. Reports specific incomplete states (`missing snapshots`, `missing or empty model.bin`, etc.).
+  - `resolve_wake_word_model`: verifies `os.path.getsize(c) > 0`.
+  - `_audio_thread`: validates both wake model and Whisper assets upfront before opening the microphone stream.
+  - `_get_whisper`: verifies assets before calling `WhisperModel(..., local_files_only=True)`, raising descriptive errors instead of silent failure.
+  - `_sanitize_voice_error`: prioritizes specific error classification (wake model, whisper, mic) before generic path regex stripping.
+
+### 3. Automated Regression Tests
+- **Frontend Launcher Validation (`node --test`)**:
+  - Added regression test verifying `getBetaEnvironment` with inherited `VEGA_BETA_VOICE='1'` and `VEGA_ENABLE_VOICE='1'` forces `voiceEnabled: false`, deletes both flags, and sets `VEGA_DISABLE_VOICE: '1'`.
+  - `npm test --prefix frontend` -> **74 passed**, 0 failed.
+- **Backend Targeted Tests (`pytest`)**:
+  - `python -m pytest backend/tests/test_beta_voice.py -v` -> **8 passed** in 23.06s:
+    - `test_whisper_cache_directory_alone_does_not_imply_usable_model`: validates non-existent, empty repo, empty snapshots, missing model.bin, 0-byte model.bin, and complete snapshots.
+    - `test_zero_byte_wake_model_rejected`: rejects 0-byte wake-word model files.
+    - `test_inherited_voice_env_does_not_enable_beta_voice`: confirms inherited `VEGA_ENABLE_VOICE` is scrubbed and ordinary beta profile stays disabled.
+    - `test_beta_default_disables_voice`: ordinary beta profile keeps voice disabled.
+    - `test_beta_opt_in_voice_mode`: `--voice` enables voice mode without cloud leakage.
+    - `test_local_wake_word_resolution_no_download`: local wake model resolution without network.
+    - `test_voice_readiness_reporting`: truthful structured readiness.
+    - `test_voice_listening_toggle_and_ducking`: stream toggle and ducking lifecycle.
+  - `python -m pytest backend/tests/test_beta_profile.py -v` -> **10 passed** in 8.89s.
+- **Frontend Linter (`oxlint`)**:
+  - `npm run lint --prefix frontend` -> **0 errors**, 20 warnings.
+- **Formatting**:
+  - `git -c core.safecrlf=false diff --check` -> **0 errors**.
+
+### 4. Stop Boundary
+- Milestone corrections complete. All automated regressions passing. Stopping without claiming live microphone utterance success until owner test.
+
+---
+
+## 2026-10-04 — Voice Interruption and Deterministic Task Parsing Fix
+
+### 1. Scope, Invariants, and Preservation
+- Implemented bounded milestone covering:
+  1. **Voice interruption**: While VEGA is speaking, saying "Hey Jarvis" immediately cancels TTS playback, discards any captured VEGA speech, enters listening mode for the owner's next command, and preserves full conversation history. Ordinary command capture remains suppressed during TTS.
+  2. **Self-triggering prevention & fallbacks**: Sanitized wake phrases from spoken output (`speechText.js`), added an immediate "Stop (Esc)" button in the `AIBrain.jsx` header, and bound the global `Escape` key fallback in `App.jsx`.
+  3. **Utterance concurrency guard**: Added generational `utteranceId` tracking in `useChat.js` so cancelled or superseded utterances cannot reset the speaking state of newer utterances.
+  4. **Deterministic task parsing fix**: Fixed parsing failures for `"Add a new task to review sorting algorithms"` and `"Add a task to review sorting algorithms"` so both route to `create_task` with clean text (`"review sorting algorithms"`), without creating duplicate tasks or inferring creation from prose.
+- Preserved existing changes, personal databases (`backend/jarvis.db`), `.env`, and builds.
+
+### 2. Sequential Reviews
+- As mandated by `AGENTS.md` (lines 14–18), subagent delegation was unavailable so two bounded read-only reviews were conducted sequentially:
+  1. **Voice Interruption & Ducking Review**:
+     - Investigated `backend/voice_service.py`: previous ducking implementation skipped `oww.predict` entirely and reset the model buffer on every audio chunk, preventing spoken wake detection during playback.
+     - Redesigned `_audio_thread`: when ducked, background audio is NOT accumulated into command recording buffers (keeping command capture suppressed). Incoming chunks are evaluated with bounded `oww.predict`. If `wake_fired` triggers: ducking is cleared (`set_duck(False)`), audio buffers and VAD states are reset clean, and recording starts afresh with `{"type": "wake", "interrupt": True}` and `{"type": "listening"}`.
+     - Investigated `useChat.js`: cancelled Web Speech utterances fire asynchronous `onerror`/`onend` events. Without concurrency tracking, a cancelled utterance callback could clear `isSpeaking` after a newer utterance had already begun. Added `currentUtteranceIdRef` and exported `stopSpeaking()`.
+  2. **Deterministic Task Parsing Review**:
+     - In `backend/command_parser.py`: regex `r"^(?:add|create|make|new)\s+(?:a\s+|new\s+)?(?:task|to-?do)[:\s]+(.+?)[.!?]*$"` matched only `"a "` or `"new "`, failing on `"a new task"`.
+     - In `"Add a task to review sorting algorithms"`, `m.group(1)` captured `"to review sorting algorithms"`. When no deadline was found, `_clean_body` was never called, leaving the leading `"to "`.
+     - Fixed regex with `(?:(?:a|the)\s+)?(?:new\s+)?(?:task|to-?do)(?::\s*|\s+(?:to|that|called|named)\s+|\s+)` and enforced `_clean_body(body)` on non-deadline matches. Cleanly yields `"review sorting algorithms"`.
+
+### 3. Files Changed
+- `backend/command_parser.py`: Updated `create_task` pattern and body cleaning.
+- `backend/voice_service.py`: Added wake prediction during ducking, immediate un-ducking, clean frame discard, and interrupt event emission.
+- `frontend/src/hooks/useChat.js`: Added `currentUtteranceIdRef` generational guard, implemented and exported `stopSpeaking()`.
+- `frontend/src/App.jsx`: Wired `chatRef.current.stopSpeaking()` on `wake` event when `isSpeaking`, added global `Escape` key handler for stopping speech, and passed `onStopSpeaking` to `AIBrain`.
+- `frontend/src/components/AIBrain.jsx`: Added `onStopSpeaking` prop and rendered "Stop (Esc)" button next to audio visualizer while speaking.
+- `frontend/src/lib/speechText.js`: Sanitized wake phrases (`\bhey\s+jarvis\b`) to `'VEGA'` to prevent synthesized speech from triggering the wake model.
+- `backend/tests/test_command_parser.py`: Added `test_task_creation_phrasing_regressions`.
+- `backend/tests/test_beta_voice.py`: Added `test_voice_interruption_ducking_lifecycle`.
+- `frontend/tests/speechText.test.js`: Added wake phrase sanitization test.
+- `frontend/tests/voiceInterruption.test.js`: Added unit tests for speech interruption, utterance concurrency protection, and history preservation.
+
+### 4. Verification and Exact Results
+- **Backend Parser Tests (`pytest`)**:
+  - `python -m pytest backend/tests/test_command_parser.py` -> **34 passed** in 0.69s.
+- **Backend Targeted Voice Tests (`pytest`)**:
+  - `python -m pytest backend/tests/test_beta_voice.py -k test_voice_interruption_ducking_lifecycle` -> **1 passed** (8 deselected) in 1.60s.
+- **Frontend Unit Tests (`node --test`)**:
+  - `npm test --prefix frontend` -> **79 passed**, 0 failed in 665ms.
+- **Frontend Linter (`oxlint`)**:
+  - `npm run lint --prefix frontend` -> **0 errors**, 20 warnings.
+- **Git Format Check**:
+  - `git diff --check` -> **0 errors**.
+
+### 5. Mocked vs Real Audio Boundaries
+- Automated tests verify programmatic state transitions, regex parsing, utterance cancellation, concurrency guards, and ducking flag toggles.
+- Real acoustic environments with laptop speakers placed closely to laptop microphones without hardware Acoustic Echo Cancellation (AEC) can cause acoustic coupling.
+- Ducking strictly suppresses ordinary speech accumulation during TTS, but to guard against edge cases or loud playback, immediate physical fallbacks are provided:
+  1. The on-screen **"Stop (Esc)"** button in the AIBrain header.
+  2. The global **`Escape`** keyboard shortcut.
+- Real acoustic spoken interruption on physical hardware remains subject to ambient mic sensitivity and physical speaker volume.
+
+### 6. Next Step / Stop Boundary
+- Milestone complete. Stopping as instructed and providing owner test procedure.
+
+---
+
+## 2026-10-04 — Voice Interruption Handoff Correction and Regression Coverage
+
+### 1. Scope, Invariants, and Preservation
+- Corrected the voice interruption handoff between `backend/voice_service.py` and the frontend client per owner requirements:
+  1. Implemented a backend pending-interruption state (`_interruption_pending`) that keeps speech ducking active and continues discarding incoming audio chunks while waiting for frontend confirmation.
+  2. Frontend unconditionally cancels Web Speech API synthesis on wake interrupt events without relying solely on React's asynchronous `isSpeaking` state.
+  3. Frontend sends an explicit acknowledgement correlated to the current interruption (`interruption_id`) via WebSocket or HTTP POST fallback (`/api/voice/interrupt_ack`).
+  4. Backend begins command recording only upon receiving a matching, non-stale acknowledgement, immediately purging any audio queued prior to the acknowledgement to prevent VEGA's own speaker output from contaminating user command frames.
+  5. Enforced fail-closed behavior: bounded 1.5s timeout (`INTERRUPT_ACK_TIMEOUT`), disconnect handling (`unregister_client`), or microphone disable (`set_voice_enabled(False)`) resets the pending interruption and rejects delayed/stale acknowledgements.
+  6. Replaced copied simulation tests in `frontend/tests/voiceInterruption.test.js` with unit tests exercising production speech and interruption helpers (`createSpeechSession`, `handleVoiceMessage`, `sendInterruptAck`).
+- Preserved existing changes, personal databases (`backend/jarvis.db`), `.env`, and builds. No claim of hardware AEC or guaranteed acoustic speaker discrimination.
+
+### 2. Architecture & Design Implementation
+- **Backend Voice Service (`backend/voice_service.py`)**:
+  - Added pending interruption tracking: `_interruption_pending`, `_current_interruption_id`, `_interruption_deadline`, `_interruption_ack_event`, and `INTERRUPT_ACK_TIMEOUT = 1.5`.
+  - Added public state query and handshake methods: `is_interruption_pending()`, `start_interruption()`, `acknowledge_interruption(interruption_id)`, `cancel_interruption(reason)`, and `get_interruption_state()`.
+  - In `_audio_thread()`:
+    - While ducked, wake detection remains bounded. When `wake_fired` triggers, `start_interruption()` generates a UUID `interruption_id`, enters pending state with a 1.5s deadline, emits `{"type": "wake", "interrupt": True, "interruption_id": id}`, and continues discarding incoming audio chunks while waiting for client confirmation.
+    - When `acknowledge_interruption(id)` receives a matching `interruption_id` before the deadline, it clears ducking, resets pending state, and sets `_interruption_ack_event`.
+    - In `_audio_thread()`, when `_interruption_ack_event.is_set()` fires, the audio queue `audio_q` is purged completely of pre-ack frames, `recorded_frames` is re-initialized, VAD is reset, `recording = True` is armed, and `{"type": "listening"}` is emitted to start capturing the user's fresh command.
+    - If the timeout expires without an acknowledgement, `is_interruption_pending()` fails closed (clears pending state, refuses recording, logs expiration).
+    - If all clients disconnect or voice listening is disabled, `cancel_interruption()` aborts any in-flight interruption.
+- **Backend API & WebSocket (`backend/main.py`)**:
+  - In `websocket_voice`: parses incoming JSON text messages and routes `{"type": "interrupt_ack", "interruption_id": ...}` to `voice_service.acknowledge_interruption(...)`.
+  - Added REST endpoint: `POST /api/voice/interrupt_ack` accepting `VoiceInterruptAckRequest(interruption_id: str)` returning `{"acknowledged": bool, "interruption_id": str}` as a resilient fallback if WebSocket frames are dropped.
+- **Frontend Production Interruption Library (`frontend/src/lib/voiceInterruption.js`)**:
+  - `createSpeechSession`: encapsulates utterance generational counter (`currentUtteranceId`), active state (`isSpeaking`), cancellation tracking, and safe callbacks that ignore stale callbacks from superseded utterances.
+  - `sendInterruptAck`: sends correlated acknowledgement via WebSocket if open (`readyState === 1`), with automatic HTTP POST fallback to `/api/voice/interrupt_ack`.
+  - `handleVoiceMessage`: unconditionally cancels speech synthesis and sends correlated interrupt acknowledgement when `data.interrupt === true`, without gating on React state updates.
+- **Frontend App & Hook Integration (`frontend/src/App.jsx`, `frontend/src/hooks/useChat.js`)**:
+  - `useChat` delegates speech synthesis execution and concurrency tracking to `createSpeechSession`.
+  - `App.jsx` invokes `handleVoiceMessage` in `ws.onmessage` and wires the ack handshake directly.
+  - Preserved on-screen **"Stop (Esc)"** button and global **`Escape`** keyboard fallback.
+
+### 3. Automated Regression Verification
+- **Frontend Unit Tests (`node --test`)**:
+  - `npm test --prefix frontend` -> **81 passed**, 0 failed in 744ms.
+  - Tests in `frontend/tests/voiceInterruption.test.js` exercise production helpers directly:
+    1. `production speech session: cancelled utterance callbacks cannot reset newer utterance`: verifies delayed `onerror`/`onend` from cancelled utterances do not clear speaking state of newer utterances.
+    2. `production speech session: stopSpeaking invalidates current utterance and cancels synthesis`: verifies immediate invalidation and synthesis cancellation.
+    3. `handleVoiceMessage: unconditionally cancels speech on interrupt event without relying on isSpeaking`: verifies cancellation executes even if React state is delayed.
+    4. `sendInterruptAck: sends via WebSocket when open and falls back to HTTP POST`: verifies WebSocket transmission, HTTP POST fallback on closed socket, and safe rejection of missing IDs.
+    5. `handleVoiceMessage: handles repeated interruptions cleanly`: verifies rapid back-to-back interruptions increment utterance generations cleanly.
+    6. `handleVoiceMessage: normal wake without interrupt flag does not send ack`: verifies ordinary wake events do not emit redundant interrupt acks.
+- **Backend Targeted Tests (`pytest`)**:
+  - `python -m pytest backend/tests/test_beta_voice.py` -> **11 passed**, 1 warning in 23.09s:
+    - `test_voice_interruption_ducking_lifecycle`: validates ducking maintenance during pending interruption, rejection of stale acks, un-ducking upon matching ack, and recording arming signal.
+    - `test_interruption_ack_timeout_and_fail_closed`: validates 1.5s timeout expiration, rejection of post-timeout acks, and client disconnect cancellation.
+    - `test_post_interrupt_ack_endpoint`: validates REST endpoint behavior with active vs non-existent or replayed acks.
+  - `python -m pytest backend/tests/test_command_parser.py` -> **34 passed** in 0.65s.
+- **Frontend Linter (`oxlint`)**:
+  - `npm run lint --prefix frontend` -> **0 errors**, 25 warnings in 117ms.
+- **Formatting**:
+  - `git diff --check` -> **0 errors**.
+
+### 4. Real-Audio Limitations and Fallback Protections
+- **No Acoustic Echo Cancellation (AEC) Claim**: The software does not implement hardware AEC or DSP-based acoustic subtraction. Laptop microphones situated near internal speakers will inevitably receive physical speaker output.
+- **Software Mitigation**:
+  - Ducking suppresses command recording during TTS output.
+  - Pending interruption state holds command recording in queue discard mode until the frontend confirms that audio synthesis has ceased.
+  - Pre-acknowledgement queue purging discards residual audio frames captured during the TTS cancellation roundtrip latency (typically 50-200ms).
+- **Physical Fallbacks**:
+  - In high-volume scenarios where speaker leakage might trigger wake detection or if the user wishes to silence VEGA manually, immediate physical fallbacks are provided:
+    1. **"Stop (Esc)"** button in the AIBrain visualizer header.
+    2. Global **`Escape`** hotkey.
+
+### 5. Stop Boundary
+- Voice interruption handoff correction and production regression coverage complete. Stopping after this correction per user instructions.
+
+---
+
+## 2026-10-04 — Reactive Productivity Hub Updates, Timer Granularity, and Project Architecture Governance
+
+### 1. Scope, Invariants, and Preservation
+- Completed the active Phase 2 milestone:
+  1. **Reactive Productivity Hub Updates**: Implemented pub/sub event bus (`publishProductivityUpdate` / `subscribeProductivityUpdates`) in `frontend/src/lib/productivityUpdates.js`. Committed actions from chat or voice (e.g. `create_task`, `set_task_completed`, `start_timer`) automatically refresh mounted `ProductivityHub.jsx` views without manual user refresh or background polling. Failed actions or prose-only replies do not trigger redundant re-renders.
+  2. **Timer Granularity**: Enhanced `ProductivityHub.jsx` timer form to support both seconds and minutes units, validated between 1 second and 86,400 seconds (24 hours). Added responsive styling (`.hub-active-cards`, `.hub-summary-grid`, `.timer-form`) in `frontend/src/index.css`.
+  3. **Architecture & Project Governance Documentation**: Established standardized project documentation: `PROJECT.md`, `ARCHITECTURE.md`, `ROADMAP.md`, `TASKS.md`, and `AI_INSTRUCTIONS.md`.
+- Preserved existing changes, personal databases (`backend/jarvis.db`), `.env`, and builds.
+
+### 2. Files Changed & Added
+- `frontend/src/lib/productivityUpdates.js`: New pub/sub event bus module.
+- `frontend/src/components/ProductivityHub.jsx`: Subscribed to productivity updates; added seconds/minutes timer inputs and responsive classes.
+- `frontend/src/hooks/useChat.js`: Dispatches `publishProductivityUpdate(data)` on successful mutating action receipts.
+- `frontend/src/index.css`: Added responsive styles for hub cards and timer forms.
+- `frontend/tests/productivityUpdates.test.js`: Added 3 unit tests for action filtering, error handling, unmounting, and replay.
+- `PROJECT.md`, `ARCHITECTURE.md`, `ROADMAP.md`, `TASKS.md`, `AI_INSTRUCTIONS.md`: Complete project specifications and operational guidelines.
+
+### 3. Automated Verification Results
+- **Frontend Unit Tests (`node --test`)**: `npm test --prefix frontend` -> **81 passed**, 0 failed in 715ms.
+- **Backend Targeted Tests (`pytest`)**: `python -m pytest backend/tests/test_command_parser.py backend/tests/test_beta_voice.py` -> **45 passed** (34 parser + 11 voice) in 69.89s.
+- **Frontend Linter (`oxlint`)**: `npm run lint --prefix frontend` -> **0 errors**, 25 warnings in 252ms.
+- **Git Format Check**: `git diff --check` -> **0 errors**.
+
+### 4. Next Step
+- Milestone complete and verified. Ready for Git commit checkpoint. Next phase is Phase 3: Owner-supervised desktop acceptance using `docs/BETA_ACCEPTANCE_CHECKLIST.md`.

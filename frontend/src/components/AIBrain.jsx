@@ -25,6 +25,7 @@ export default function AIBrain({
   voiceNote,
   onSend,
   onToggleMute,
+  onStopSpeaking,
   onAppendMessage,
   onClearHistory,
 }) {
@@ -176,25 +177,37 @@ export default function AIBrain({
     <div className="flex flex-col h-full w-full max-w-3xl mx-auto rounded-lg border border-current/20 bg-black/10 backdrop-blur-sm overflow-hidden shadow-inner">
 
       {/* Header */}
-      <div className="flex items-center justify-between p-3 border-b border-current/20 bg-black/20">
-        <div className="flex items-center gap-2">
+      <div className="flex flex-wrap items-center justify-between gap-2 p-3 border-b border-current/20 bg-black/20">
+        <div className="flex flex-wrap min-w-0 items-center gap-2">
           <Cpu size={18} className="text-[var(--accent)]" />
           <h2 className="text-sm font-semibold tracking-wider">A.I. COGNITIVE CORE</h2>
 
           <span className={`flex items-center gap-1 ml-2 text-xs ${wakeWordActive ? 'text-green-400' : 'text-red-400'}`}>
             <Radio size={12} className={isVoiceActive ? 'animate-pulse' : ''} />
-            {wakeWordActive ? (voiceStatusLabel || 'Wake word active') : 'Voice offline'}
+            {wakeWordActive ? (voiceStatusLabel || 'Wake word active') : (voiceNote || 'Voice offline')}
           </span>
 
           {isSpeaking && (
-            <span className="flex items-center gap-1 ml-2">
-              <span className="w-1 h-3 bg-[var(--accent)] animate-pulse" style={{animationDelay: '0ms'}} />
-              <span className="w-1 h-4 bg-[var(--accent)] animate-pulse" style={{animationDelay: '150ms'}} />
-              <span className="w-1 h-3 bg-[var(--accent)] animate-pulse" style={{animationDelay: '300ms'}} />
-            </span>
+            <div className="flex items-center gap-2 ml-2">
+              <span className="flex items-center gap-1">
+                <span className="w-1 h-3 bg-[var(--accent)] animate-pulse" style={{animationDelay: '0ms'}} />
+                <span className="w-1 h-4 bg-[var(--accent)] animate-pulse" style={{animationDelay: '150ms'}} />
+                <span className="w-1 h-3 bg-[var(--accent)] animate-pulse" style={{animationDelay: '300ms'}} />
+              </span>
+              <button
+                type="button"
+                onClick={onStopSpeaking}
+                className="flex items-center gap-1 px-2 py-0.5 rounded text-xs bg-red-500/20 text-red-300 hover:bg-red-500/40 border border-red-500/40 transition-colors"
+                title="Stop speaking (Esc)"
+                aria-label="Stop speaking"
+              >
+                <VolumeX size={12} />
+                <span>Stop (Esc)</span>
+              </button>
+            </div>
           )}
         </div>
-        <div className="flex items-center gap-1">
+        <div className="flex shrink-0 items-center gap-1">
           <button
             onClick={() => { if (messages.length > 0) onClearHistory() }}
             disabled={messages.length === 0}

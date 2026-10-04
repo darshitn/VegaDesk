@@ -80,6 +80,41 @@
   
   .jarvis-header {
     border-bottom: 1px solid var(--border-color);
+    flex-wrap: wrap;
+    gap: 0.75rem;
+  }
+
+  .settings-panel {
+    flex-shrink: 0;
+    max-height: min(40vh, 20rem);
+    overflow-y: auto;
+    scrollbar-gutter: stable;
+  }
+
+  /* Size cards for their own column, rather than the full window width. */
+  .hub-active-cards {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 16rem), 1fr));
+    gap: 0.75rem;
+  }
+
+  .hub-summary-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 18rem), 1fr));
+  }
+
+  .timer-form {
+    display: grid;
+    grid-template-columns: minmax(4rem, 1fr) auto auto;
+    gap: 0.25rem;
+  }
+
+  .settings-panel .toggle-group {
+    flex-wrap: wrap;
+  }
+
+  .settings-panel label {
+    flex-shrink: 0;
   }
 
   /* Panels keep their content height. A bounded column owns scrolling instead
@@ -161,7 +196,7 @@
 
   @media (min-width: 56rem) {
     .workspace-layout {
-      grid-template-columns: 1.15fr 0.85fr;
+      grid-template-columns: minmax(0, 1.15fr) minmax(0, 0.85fr);
       grid-template-rows: minmax(0, 1fr);
       overflow: hidden;
       padding: 1.25rem 1.5rem;

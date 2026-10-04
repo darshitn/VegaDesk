@@ -6,6 +6,7 @@ from contextlib import asynccontextmanager
 import asyncio
 import sys
 import os
+import json
 
 try:
     from providers.base import redact_secrets
@@ -124,7 +125,14 @@ else:
     for key in ["GEMINI_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GROQ_API_KEY", "MISTRAL_API_KEY"]:
         os.environ.pop(key, None)
     os.environ["LLM_PROVIDER"] = "none"
-    os.environ["VEGA_DISABLE_VOICE"] = "1"
+    # Beta voice acceptance mode: strictly opt-in via VEGA_BETA_VOICE=1 (set by launcher with --voice)
+    # Inherited environment flags like VEGA_ENABLE_VOICE must NOT enable voice in beta profile
+    os.environ.pop("VEGA_ENABLE_VOICE", None)
+    beta_voice_opt_in = os.getenv("VEGA_BETA_VOICE", "").strip() in ("1", "true", "yes")
+    if not beta_voice_opt_in:
+        os.environ["VEGA_DISABLE_VOICE"] = "1"
+    else:
+        os.environ.pop("VEGA_DISABLE_VOICE", None)
     os.environ["VEGA_DISABLE_RADAR"] = "1"
 
 # Configured provider (env). A per-request `provider` field may override it;
@@ -234,6 +242,7 @@ def health_check(diagnostics: bool = False):
     return {
         "status": overall_status,
         "voice": voice_ok,
+        "voice_test_mode": bool(is_beta and (os.getenv("VEGA_BETA_VOICE", "").strip() in ("1", "true", "yes") or os.getenv("VEGA_ENABLE_VOICE", "").strip() in ("1", "true", "yes"))),
         "profile": profile_name,
         "run_id": run_id,
         "deterministic_only": is_beta or configured_provider == "none",
@@ -380,7 +389,13 @@ async def websocket_voice(websocket: WebSocket):
     voice_service.register_client(websocket)
     try:
         while True:
-            await websocket.receive_text()
+            raw = await websocket.receive_text()
+            try:
+                msg = json.loads(raw)
+                if isinstance(msg, dict) and msg.get("type") == "interrupt_ack":
+                    voice_service.acknowledge_interruption(msg.get("interruption_id"))
+            except Exception:
+                pass
     except WebSocketDisconnect:
         pass
     except Exception:
@@ -503,6 +518,10 @@ class VoiceDuckRequest(BaseModel):
     active: bool
 
 
+class VoiceInterruptAckRequest(BaseModel):
+    interruption_id: str
+
+
 @app.post("/api/voice/duck")
 def set_voice_duck(req: VoiceDuckRequest):
     """Frontend calls this while VEGA's own TTS is speaking so the always-on
@@ -512,14 +531,43 @@ def set_voice_duck(req: VoiceDuckRequest):
     return {"ducked": voice_service.is_ducked()}
 
 
+@app.post("/api/voice/interrupt_ack")
+def post_voice_interrupt_ack(req: VoiceInterruptAckRequest):
+    """Frontend calls this to acknowledge that TTS playback was cancelled following
+    an interruption wake event, arming the voice service for clean command recording."""
+    acknowledged = voice_service.acknowledge_interruption(req.interruption_id)
+    return {"acknowledged": acknowledged}
+
+
 @app.get("/api/voice/enabled")
 def get_voice_enabled():
-    return {"enabled": voice_service.is_enabled()}
+    is_disabled = os.getenv("VEGA_DISABLE_VOICE", "").strip() in ("1", "true", "yes")
+    is_beta = os.getenv("VEGA_PROFILE") == "beta"
+    beta_voice_opt_in = os.getenv("VEGA_BETA_VOICE", "").strip() in ("1", "true", "yes") or \
+                        os.getenv("VEGA_ENABLE_VOICE", "").strip() in ("1", "true", "yes")
+    return {
+        "enabled": False if is_disabled else voice_service.is_enabled(),
+        "active": voice_service.is_voice_active(),
+        "profile": os.getenv("VEGA_PROFILE", "default"),
+        "voice_test_mode": bool(is_beta and beta_voice_opt_in),
+        "status": voice_service.get_status(),
+        "readiness": voice_service.check_voice_readiness(),
+    }
 
+
+@app.get("/api/voice/readiness")
+def get_voice_readiness():
+    return voice_service.check_voice_readiness()
 
 
 @app.post("/api/voice/enabled")
 def set_voice_enabled(req: VoiceEnabledRequest):
+    if os.getenv("VEGA_DISABLE_VOICE", "").strip() in ("1", "true", "yes"):
+        return {
+            "enabled": False,
+            "status": False,
+            "error": "Voice service disabled in current profile (launch with npm run dev:beta:voice to enable voice test mode)"
+        }
     voice_service.set_voice_enabled(bool(req.enabled))
     return {"enabled": bool(req.enabled), "status": voice_service.is_voice_active()}
 

@@ -41,7 +41,7 @@ npm run seed:beta
 
 ---
 
-### B. Launch Beta Desktop Session (Development Mode)
+### B. Launch Beta Desktop Session (Ordinary Development Mode — Mic Disabled)
 ```powershell
 # 2. Launch owned beta backend on port 8005 and Electron frontend with shared run_id
 npm run dev:beta
@@ -51,6 +51,20 @@ npm run dev:beta
 - Tray tooltip: `V.E.G.A. [BETA PROFILE · PORT 8005]`
 - Header badge: `BETA PROFILE · PORT 8005`
 - Global shortcut: `Ctrl+Alt+Space` (leaves `Ctrl+Space` for personal profile)
+- Wake Word toggle in Settings: Unchecked (disabled by default)
+
+---
+
+### B2. Launch Beta Voice Acceptance Session (Opt-in Voice Test Mode)
+```powershell
+# Launch owned beta session with microphone capture and local offline wake-word listener enabled
+npm run dev:beta:voice
+```
+*Visual indicators of success:*
+- Launcher banner reports: `Voice Mode: OPT-IN VOICE ACCEPTANCE (Mic & Whisper active)`
+- Cognitive Core header displays green indicator and `Wake word active` (or truthful hardware/model note if unavailable)
+- Saying *"Hey Jarvis"* activates recording mode, transcribes speech offline via cached Whisper, and executes deterministic actions.
+- Toggling Wake Word off in Settings closes the microphone capture stream immediately.
 
 ---
 
@@ -126,7 +140,7 @@ Status options: `NOT RUN` | `PASS` | `FAIL` | `DEFERRED` | `UNVERIFIED`.
 | **NOT-02** | Timer & Toast (Hidden) | Create 5s timer, hide window (`Ctrl+Alt+Space`) | Dev / Packaged | Native Windows toast dispatched via Electron; clicking toast restores & focuses window | NOT RUN | |
 | **NOT-03** | Toast Deduplication | Trigger repeated alert | Dev / Packaged | Deduplicator suppresses duplicate OS banner within TTL window | NOT RUN | |
 | **NOT-04** | Truthful Claims Audit | Inspect notification event payload | Dev | Status reports `accepted` (`api_accepted`), never falsely claims user observed rendering until clicked | NOT RUN | |
-| **PTT-01** | Voice / Wake Word | Inspect push-to-talk / speech status | Dev / Packaged | Background mic disabled in beta; speech transcription requires local faster-whisper. If assets absent, mark DEFERRED/UNVERIFIED | NOT RUN | |
+| **PTT-01** | Voice / Wake Word | Test voice test mode (`npm run dev:beta:voice`) vs default (`npm run dev:beta`) | Dev | In `dev:beta`, mic is disabled by default; in `dev:beta:voice`, "Hey Jarvis" wake-word listens offline. Toggling off releases mic stream. Cloud stays disabled. | NOT RUN | |
 | **WIN-01** | Window Hotkey | Press `Ctrl+Alt+Space` repeatedly | Dev / Packaged | Smoothly hides and shows overlay without stolen focus or flickering | NOT RUN | |
 | **WIN-02** | Maximize / Restore | Click Maximize button (or `F11`) | Dev / Packaged | Expands to full screen / work-area; click again restores exact pre-maximized bounds | NOT RUN | |
 | **WIN-03** | Actual Quit vs Hide | Test `X` (hides) vs Tray -> Quit (exits) | Dev / Packaged | `X` hides to tray; tray Quit terminates window and owned backend process | NOT RUN | |

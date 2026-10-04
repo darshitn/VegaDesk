@@ -1,6 +1,9 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
 import { loadMessages, saveMessages, clearMessages } from '../lib/chatStore'
 import { getApiBase, getApiPort, verifiedFetch } from '../lib/apiConfig'
+import { prepareSpeechText } from '../lib/speechText'
+import { publishProductivityUpdate } from '../lib/productivityUpdates'
+import { createSpeechSession } from '../lib/voiceInterruption'
 
 // Tell the backend wake-word listener that VEGA is speaking (or has stopped),
 // so the mic ignores VEGA's own voice. Fire-and-forget; the server also
@@ -47,21 +50,22 @@ export default function useChat({ userName, provider }) {
   const configRef = useRef({ userName, provider })
   useEffect(() => { configRef.current = { userName, provider } }, [userName, provider])
 
+  const speechSessionRef = useRef(null)
+  if (!speechSessionRef.current) {
+    speechSessionRef.current = createSpeechSession({
+      speechSynthesis: typeof window !== 'undefined' ? window.speechSynthesis : null,
+      onStateChange: (speaking) => setIsSpeaking(speaking),
+      onDuck: (active) => postVoiceDuck(active),
+    })
+  }
+
+  const stopSpeaking = useCallback(() => {
+    speechSessionRef.current?.stopSpeaking()
+  }, [])
+
   const speakText = useCallback((text) => {
-    if (isMuted || typeof window === 'undefined' || !window.speechSynthesis) return
-    const clean = String(text)
-      .replace(/```[\s\S]*?```/g, ' ')
-      .replace(/\{[\s\S]*?\}/g, ' ')
-      .replace(/[*_#`>|]/g, ' ')
-      .replace(/\s+/g, ' ')
-      .trim()
-    if (!clean) return
-    window.speechSynthesis.cancel()
-    const utterance = new SpeechSynthesisUtterance(clean)
-    utterance.onstart = () => setIsSpeaking(true)
-    utterance.onend = () => setIsSpeaking(false)
-    utterance.onerror = () => setIsSpeaking(false)
-    window.speechSynthesis.speak(utterance)
+    if (isMuted) return
+    speechSessionRef.current?.speak(text)
   }, [isMuted])
 
   const sendMessage = useCallback(async (text, opts = {}) => {
@@ -92,6 +96,7 @@ export default function useChat({ userName, provider }) {
         setMessages(prev => [...prev, { role: 'assistant', content: `[SYSTEM ERROR] ${data.error}` }])
         speakText('System error encountered.')
       } else {
+        publishProductivityUpdate(data)
         const mode = ['deterministic', 'local', 'cloud', 'none'].includes(data.executionMode)
           ? data.executionMode : undefined
         setMessages(prev => [...prev, {
@@ -132,7 +137,7 @@ export default function useChat({ userName, provider }) {
   }, [])
 
   return {
-    messages, isThinking, isMuted, isSpeaking,
-    setIsMuted, speakText, sendMessage, appendMessage, clearHistory,
+    messages, isThinking, isMuted, isSpeaking, speechSession: speechSessionRef.current,
+    setIsMuted, speakText, stopSpeaking, sendMessage, appendMessage, clearHistory,
   }
 }

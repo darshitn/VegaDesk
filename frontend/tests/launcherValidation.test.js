@@ -138,6 +138,34 @@ test('launcher: getBetaEnvironment strips cloud credentials and sets offline det
   assert.equal(betaPort, 8005)
   assert.equal(betaRoot, 'C:\\TestRoot\\Beta')
   assert.ok(betaDbPath.includes('jarvis-beta.db'))
+
+  // Voice opt-in mode
+  const voiceOpt = getBetaEnvironment(
+    'C:\\TestRoot\\Beta',
+    'test-run-voice',
+    baseEnv,
+    { voice: true }
+  )
+  assert.equal(voiceOpt.voiceEnabled, true)
+  assert.equal(voiceOpt.env.VEGA_BETA_VOICE, '1')
+  assert.equal(voiceOpt.env.VEGA_DISABLE_VOICE, undefined, 'Must not disable voice when voice opt-in requested')
+  assert.equal(voiceOpt.env.GEMINI_API_KEY, undefined, 'Must still strip cloud keys in voice mode')
+
+  // Regression: inherited voice flags in baseEnv must NOT enable voice without explicit options.voice
+  const inheritedEnv = {
+    ...baseEnv,
+    VEGA_BETA_VOICE: '1',
+    VEGA_ENABLE_VOICE: '1',
+  }
+  const defaultFromInherited = getBetaEnvironment(
+    'C:\\TestRoot\\Beta',
+    'test-run-inherited',
+    inheritedEnv
+  )
+  assert.equal(defaultFromInherited.voiceEnabled, false, 'Must not enable voice from inherited environment flags')
+  assert.equal(defaultFromInherited.env.VEGA_DISABLE_VOICE, '1', 'Must force disable voice')
+  assert.equal(defaultFromInherited.env.VEGA_BETA_VOICE, undefined, 'Must strip inherited VEGA_BETA_VOICE')
+  assert.equal(defaultFromInherited.env.VEGA_ENABLE_VOICE, undefined, 'Must strip inherited VEGA_ENABLE_VOICE')
 })
 
 test('launcher: killProcessTree invokes taskkill on Windows with child PID', () => {
