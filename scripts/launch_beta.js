@@ -26,7 +26,8 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const rootDir = path.resolve(__dirname, '..')
 
 const enableVoice = process.argv.includes('--voice')
-const { env, runId, betaPort, betaRoot, betaDbPath, voiceEnabled } = getBetaEnvironment(null, null, process.env, { voice: enableVoice })
+const enableOllama = process.argv.includes('--ollama')
+const { env, runId, betaPort, betaRoot, betaDbPath, voiceEnabled, ollamaEnabled } = getBetaEnvironment(null, null, process.env, { voice: enableVoice, ollama: enableOllama })
 
 let backendChild = null
 let frontendChild = null
@@ -53,8 +54,9 @@ async function main() {
   console.log(`Run ID:        ${runId}`)
   console.log(`Data Root:     ${betaRoot}`)
   console.log(`Target DB:     ${betaDbPath}`)
+  console.log(`Local AI:      ${ollamaEnabled ? 'Local Ollama opt-in active' : 'Disabled (Deterministic-only)'}`)
   console.log(`Voice Mode:    ${voiceEnabled ? 'Voice acceptance requested' : 'Disabled (Ordinary beta baseline)'}`)
-  console.log(`Mode:          Deterministic Offline Only (Cloud & Radar disabled)`)
+  console.log(`Mode:          ${ollamaEnabled ? 'Local AI (Ollama) + Deterministic (Cloud & Radar disabled)' : 'Deterministic Offline Only (Cloud & Radar disabled)'}`)
   console.log('='.repeat(70))
 
   // 1. Port Availability Check
@@ -138,6 +140,17 @@ async function main() {
   }
 
   console.log(`[VEGA LAUNCHER] Backend verified ready! (profile=beta, run_id=${runId})`)
+  if (ollamaEnabled) {
+    const prov = readyProbe?.data?.provider
+    if (prov?.status === 'ready') {
+      console.log(`[VEGA LAUNCHER] Local Ollama verified ready! (model: ${prov.model || 'installed'})`)
+    } else if (prov?.status === 'missing_model') {
+      console.log(`[VEGA LAUNCHER] Local Ollama reachable, but model '${prov.model}' is not installed in local tags.`)
+    } else {
+      const err = prov?.error || prov?.status || 'unreachable'
+      console.log(`[VEGA LAUNCHER] Local Ollama note: ${err}`)
+    }
+  }
   if (voiceEnabled) {
     const vs = readyProbe?.data?.voice_service
     if (vs?.status === 'ready' || readyProbe?.data?.voice) {

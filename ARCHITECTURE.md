@@ -35,7 +35,7 @@ graph TD
 - **Core Modules:**
   - `command_parser.py`: High-speed deterministic regex parser routing natural language intents (tasks, timers, reminders, notes, apps) to tool handlers before any LLM is consulted.
   - `policy.py`: Risk classification engine (Risk 0..3) verifying permissions, action parameters, and initiation origins.
-  - `verifier.py`: Session validation, request authorization, and cryptographic action receipt generation.
+  - `verifier.py`: Session validation, request authorization, and durable action receipt generation.
   - `scheduler.py`: Background SQLite-backed job queue for timers and reminders with restart recovery and orphan healing.
   - `voice_service.py`: Multi-threaded audio capture, openWakeWord detection, Silero VAD, faster-whisper transcription, and pending-interruption state machine.
   - `telemetry.py`: Hardware statistics collector (psutil, GPUtil, platform).

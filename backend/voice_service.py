@@ -36,6 +36,7 @@ def _log(msg):
 _clients: list = []         # connected WebSocket objects
 _lock = threading.Lock()
 _event_queue: asyncio.Queue = None  # set in start()
+_event_loop: Optional[asyncio.AbstractEventLoop] = None
 _audio_thread_handle: threading.Thread = None
 _voice_active: bool = False
 _voice_error: str = ""
@@ -229,12 +230,15 @@ def is_enabled():
 def set_voice_enabled(enabled: bool):
     """Toggle wake-word listening. When disabled, the audio thread closes the
     mic stream and idles; when re-enabled it reopens and recalibrates."""
+    global _voice_error
     if enabled:
         _enabled.set()
+        _voice_error = ""
         _log("[VOICE] Wake-word listening enabled by user.")
         _enqueue({"type": "mic", "listening": False, "note": "Restarting microphone..."})
     else:
         _enabled.clear()
+        cancel_interruption("voice disabled by user")
         _log("[VOICE] Wake-word listening disabled by user (mic closed).")
         _set_mic_listening(False, "Wake word off")
 
@@ -338,8 +342,13 @@ def _enqueue(event: dict):
     """Thread-safe push into the async event queue."""
     if _event_queue is not None:
         try:
-            _event_queue.put_nowait(event)
-        except Exception:
+            if _event_loop is None:
+                # Supports standalone synchronous consumers before start().
+                # The running service always installs its owner loop first.
+                _event_queue.put_nowait(event)
+            else:
+                _event_loop.call_soon_threadsafe(_event_queue.put_nowait, event)
+        except RuntimeError:
             pass
 
 # ──────────────────────────────────────────────
@@ -384,11 +393,42 @@ def _is_speech(audio_chunk_np: np.ndarray) -> bool:
     rms = float(np.sqrt(np.mean(audio_chunk_np.astype(np.float64) ** 2)))
     return rms > _speech_energy_threshold
 
+def consume_vad_frames(buffer: np.ndarray, audio: np.ndarray, detector=None):
+    """Feed every complete frame to stateful VAD, retaining <512 samples.
+
+    Stopping on the first positive frame accumulates old speech and delays
+    endpointing even after the speaker has finished.
+    """
+    detector = _is_speech if detector is None else detector
+    pending = np.concatenate([buffer, audio])
+    complete = len(pending) // VAD_FRAME * VAD_FRAME
+    has_speech = False
+    for offset in range(0, complete, VAD_FRAME):
+        speech = detector(pending[offset:offset + VAD_FRAME])
+        has_speech = bool(speech) or has_speech
+    return has_speech, pending[complete:].copy()
+
+
+def get_wake_phrase() -> str:
+    """A configured label is not evidence that a model learned the phrase."""
+    return os.getenv("VEGA_WAKE_PHRASE", "Hey Jarvis").strip() or "Hey Jarvis"
+
+
+def get_wake_threshold() -> float:
+    import math
+    value = float(os.getenv("VEGA_WAKE_THRESHOLD", str(WAKE_THRESHOLD)))
+    if not math.isfinite(value) or not 0 < value <= 1:
+        raise ValueError("VEGA_WAKE_THRESHOLD must be finite and in (0, 1]")
+    return value
+
+
 def resolve_wake_word_model() -> Optional[str]:
-    """Resolve local path to hey_jarvis wake word model without downloading."""
-    custom_path = os.getenv("JARVIS_WAKE_MODEL_PATH")
-    if custom_path and os.path.isfile(custom_path) and os.path.getsize(custom_path) > 0:
-        return custom_path
+    """An explicit custom model never silently falls back to Jarvis."""
+    custom_path = os.getenv("VEGA_WAKE_MODEL_PATH") or os.getenv("JARVIS_WAKE_MODEL_PATH")
+    if custom_path:
+        return custom_path if os.path.isfile(custom_path) and os.path.getsize(custom_path) > 0 else None
+    if get_wake_phrase().lower() != "hey jarvis":
+        return None
     try:
         import openwakeword
         oww_dir = os.path.dirname(openwakeword.__file__)
@@ -493,6 +533,7 @@ def check_voice_readiness() -> dict:
         "whisper_ready": False,
         "mic_ready": False,
         "wake_model": None,
+        "wake_phrase": get_wake_phrase(),
         "whisper_model": os.getenv("WHISPER_MODEL", "small.en"),
         "mic_device": None,
         "errors": [],
@@ -515,7 +556,7 @@ def check_voice_readiness() -> dict:
         report["wake_word_ready"] = True
         report["wake_model"] = os.path.basename(wake_path)
     else:
-        report["errors"].append("Wake-word model 'hey_jarvis' missing or empty on disk")
+        report["errors"].append(f"Wake-word model for '{get_wake_phrase()}' missing or empty on disk")
 
     model_name = os.getenv("WHISPER_MODEL", "small.en")
     is_whisper_ready, whisper_err = verify_cached_whisper_assets(model_name)
@@ -545,6 +586,11 @@ def _audio_thread():
     """Runs in a dedicated thread. Captures mic, detects wake word, records, transcribes."""
     global _voice_active, _voice_error, _last_near_miss_log
     import queue
+    try:
+        wake_threshold = get_wake_threshold()
+    except ValueError as exc:
+        _set_mic_listening(False, str(exc))
+        return
 
     # Lazy imports — don't crash backend if audio libs missing
     try:
@@ -562,7 +608,7 @@ def _audio_thread():
 
     wake_model_path = resolve_wake_word_model()
     if not wake_model_path:
-        _log("[VOICE] Wake word model 'hey_jarvis' missing or empty on disk. Automatic downloads are disabled.")
+        _log(f"[VOICE] Wake model for '{get_wake_phrase()}' missing or empty. Automatic downloads are disabled.")
         _set_mic_listening(False, "Voice off (wake model missing)")
         return
 
@@ -576,7 +622,7 @@ def _audio_thread():
     try:
         _log(f"[VOICE] Loading local openWakeWord model from '{wake_model_path}'...")
         oww = OWWModel(wakeword_models=[wake_model_path], inference_framework="onnx" if wake_model_path.endswith(".onnx") else "tflite")
-        _log("[VOICE] Wake word model loaded. Listening for 'Hey Jarvis'...")
+        _log(f"[VOICE] Wake word model loaded. Configured phrase: '{get_wake_phrase()}'.")
     except Exception as e:
         _log(f"[VOICE] Failed to load wake word model: {e}")
         _set_mic_listening(False, "Voice off (model load failed)")
@@ -728,7 +774,7 @@ def _audio_thread():
                                 _log(f"[VOICE] Wake model predict during ducking failed: {err_key}")
                             continue
 
-                        if wake_fired(oww.prediction_buffer, WAKE_THRESHOLD):
+                        if wake_fired(oww.prediction_buffer, wake_threshold):
                             _log("[VOICE] Spoken interruption detected: 'Hey Jarvis' during speech playback.")
                             oww.reset()
                             # Enter pending-interruption state:
@@ -755,7 +801,7 @@ def _audio_thread():
                                 _log(f"[VOICE] Wake model predict failed: {err_key}")
                             continue
 
-                        if wake_fired(oww.prediction_buffer, WAKE_THRESHOLD):
+                        if wake_fired(oww.prediction_buffer, wake_threshold):
                             oww.reset()
                             recording = True
                             recorded_frames = []
@@ -775,11 +821,11 @@ def _audio_thread():
                                 if len(score) > 0:
                                     top_score = max(top_score, float(score[-1]))
 
-                            if top_score >= WAKE_THRESHOLD * 0.5 \
+                            if top_score >= wake_threshold * 0.5 \
                                     and time.time() - _last_near_miss_log > 5:
                                 _last_near_miss_log = time.time()
                                 _log(f"[VOICE] Near-miss wake score {top_score:.2f} "
-                                     f"(threshold {WAKE_THRESHOLD}) — if these never climb, "
+                                     f"(threshold {wake_threshold}) — if these never climb, "
                                      f"check the mic level/device.")
                     else:
                         recorded_frames.append(audio)
@@ -788,14 +834,7 @@ def _audio_thread():
                         # Silero VAD requires exactly 512-sample frames at 16 kHz
                         # and raises on the 1280-sample chunks — feed it through a
                         # rolling buffer so end-of-speech detection actually works.
-                        vad_buffer = np.concatenate([vad_buffer, audio])
-                        has_speech = False
-                        while len(vad_buffer) >= VAD_FRAME:
-                            frame = vad_buffer[:VAD_FRAME]
-                            vad_buffer = vad_buffer[VAD_FRAME:]
-                            if _is_speech(frame):
-                                has_speech = True
-                                break
+                        has_speech, vad_buffer = consume_vad_frames(vad_buffer, audio)
 
                         if has_speech:
                             silence_start = 0.0
@@ -849,18 +888,26 @@ def _audio_thread():
 # Transcription
 # ──────────────────────────────────────────────
 _whisper_model = None
+_whisper_load_lock = threading.Lock()
+_transcribe_lock = threading.Lock()
 
 def _get_whisper():
     global _whisper_model
-    if _whisper_model is None:
-        from faster_whisper import WhisperModel
-        model_name = os.getenv("WHISPER_MODEL", "small.en")
-        is_ready, err = verify_cached_whisper_assets(model_name)
-        if not is_ready:
-            raise RuntimeError(err or f"Whisper model '{model_name}' incomplete or missing from cache")
-        _log(f"[VOICE] Loading local faster-whisper '{model_name}' model (local_files_only=True)...")
-        _whisper_model = WhisperModel(model_name, device="cpu", compute_type="int8", local_files_only=True)
-        _log("[VOICE] Whisper model loaded from local cache.")
+    with _whisper_load_lock:
+        if _whisper_model is None:
+            from faster_whisper import WhisperModel
+            model_name = os.getenv("WHISPER_MODEL", "small.en")
+            is_ready, err = verify_cached_whisper_assets(model_name)
+            if not is_ready:
+                raise RuntimeError(err or f"Whisper model '{model_name}' incomplete or missing from cache")
+            source = os.getenv("WHISPER_MODEL_PATH") or model_name
+            device = os.getenv("WHISPER_DEVICE", "cpu").strip().lower()
+            if device not in ("cpu", "cuda"):
+                raise ValueError("WHISPER_DEVICE must be cpu or cuda")
+            compute_type = os.getenv("WHISPER_COMPUTE_TYPE", "int8_float16" if device == "cuda" else "int8").strip()
+            _log(f"[VOICE] Loading local faster-whisper '{model_name}' on {device}/{compute_type}...")
+            _whisper_model = WhisperModel(source, device=device, compute_type=compute_type, local_files_only=True)
+            _log("[VOICE] Whisper model loaded from local cache.")
     return _whisper_model
 
 def _preload_whisper():
@@ -876,6 +923,12 @@ def _preload_whisper():
         _log(f"[VOICE] Whisper preload failed: {e}")
 
 def transcribe_source(src):
+    """Serialize manual and wake transcription, including lazy segment decoding."""
+    with _transcribe_lock:
+        return _transcribe_source_locked(src)
+
+
+def _transcribe_source_locked(src):
     """Transcribe an audio source (file path or file-like) with VEGA's guarded
     command settings — shared by the wake-word pipeline and the manual-mic
     /api/transcribe endpoint so both behave identically. Fully offline: local
@@ -968,7 +1021,8 @@ async def _dispatch_events():
 # ──────────────────────────────────────────────
 def start(loop: asyncio.AbstractEventLoop):
     """Called once from FastAPI startup. Launches the audio thread + async dispatcher."""
-    global _event_queue, _audio_thread_handle
+    global _event_queue, _event_loop, _audio_thread_handle
+    _event_loop = loop
     _event_queue = asyncio.Queue()
 
     _audio_thread_handle = threading.Thread(target=_audio_thread, daemon=True, name="jarvis-voice")
@@ -984,21 +1038,6 @@ def is_voice_active() -> bool:
 
 def is_enabled() -> bool:
     return _enabled.is_set()
-
-
-def set_voice_enabled(enabled: bool):
-    """Enable or disable wake-word listening.
-    Disabling releases the microphone InputStream immediately."""
-    global _voice_active, _voice_error
-    if enabled:
-        _enabled.set()
-        _voice_error = ""
-        _log("[VOICE] Wake-word listening enabled.")
-    else:
-        _enabled.clear()
-        cancel_interruption("voice disabled by user")
-        _set_mic_listening(False, "Voice disabled by user")
-        _log("[VOICE] Wake-word listening disabled.")
 
 
 def _sanitize_voice_error(err: Any) -> Optional[str]:

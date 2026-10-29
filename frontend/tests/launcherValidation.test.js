@@ -156,6 +156,7 @@ test('launcher: getBetaEnvironment strips cloud credentials and sets offline det
     ...baseEnv,
     VEGA_BETA_VOICE: '1',
     VEGA_ENABLE_VOICE: '1',
+    VEGA_BETA_OLLAMA: '1',
   }
   const defaultFromInherited = getBetaEnvironment(
     'C:\\TestRoot\\Beta',
@@ -163,9 +164,52 @@ test('launcher: getBetaEnvironment strips cloud credentials and sets offline det
     inheritedEnv
   )
   assert.equal(defaultFromInherited.voiceEnabled, false, 'Must not enable voice from inherited environment flags')
+  assert.equal(defaultFromInherited.ollamaEnabled, false, 'Must not enable ollama from inherited environment flags')
   assert.equal(defaultFromInherited.env.VEGA_DISABLE_VOICE, '1', 'Must force disable voice')
+  assert.equal(defaultFromInherited.env.LLM_PROVIDER, 'none', 'Must force LLM_PROVIDER to none in default beta')
   assert.equal(defaultFromInherited.env.VEGA_BETA_VOICE, undefined, 'Must strip inherited VEGA_BETA_VOICE')
   assert.equal(defaultFromInherited.env.VEGA_ENABLE_VOICE, undefined, 'Must strip inherited VEGA_ENABLE_VOICE')
+  assert.equal(defaultFromInherited.env.VEGA_BETA_OLLAMA, undefined, 'Must strip inherited VEGA_BETA_OLLAMA')
+
+  // Ollama opt-in mode
+  const ollamaOpt = getBetaEnvironment(
+    'C:\\TestRoot\\Beta',
+    'test-run-ollama',
+    baseEnv,
+    { ollama: true }
+  )
+  assert.equal(ollamaOpt.ollamaEnabled, true)
+  assert.equal(ollamaOpt.env.VEGA_BETA_OLLAMA, '1')
+  assert.equal(ollamaOpt.env.LLM_PROVIDER, 'ollama')
+  assert.equal(ollamaOpt.env.OLLAMA_BASE_URL, 'http://localhost:11434')
+  assert.equal(ollamaOpt.env.GEMINI_API_KEY, undefined, 'Must still strip cloud keys in ollama mode')
+
+  // Combined Ollama + Voice mode
+  const comboOpt = getBetaEnvironment(
+    'C:\\TestRoot\\Beta',
+    'test-run-combo',
+    baseEnv,
+    { ollama: true, voice: true }
+  )
+  assert.equal(comboOpt.ollamaEnabled, true)
+  assert.equal(comboOpt.voiceEnabled, true)
+  assert.equal(comboOpt.env.VEGA_BETA_OLLAMA, '1')
+  assert.equal(comboOpt.env.VEGA_BETA_VOICE, '1')
+  assert.equal(comboOpt.env.LLM_PROVIDER, 'ollama')
+  assert.equal(comboOpt.env.VEGA_DISABLE_VOICE, undefined)
+
+  // Non-loopback OLLAMA_BASE_URL reset to loopback
+  const remoteOllamaEnv = {
+    ...baseEnv,
+    OLLAMA_BASE_URL: 'http://192.168.1.100:11434',
+  }
+  const sanitizedOllama = getBetaEnvironment(
+    'C:\\TestRoot\\Beta',
+    'test-run-sanitized',
+    remoteOllamaEnv,
+    { ollama: true }
+  )
+  assert.equal(sanitizedOllama.env.OLLAMA_BASE_URL, 'http://localhost:11434', 'Must reset remote Ollama endpoint to loopback')
 })
 
 test('launcher: killProcessTree invokes taskkill on Windows with child PID', () => {

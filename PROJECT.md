@@ -10,7 +10,7 @@ Modern desktop workflows are fragmented across separate tools for tasks, calenda
 ## 3. Project Goals
 - **Local-First & ₹0 Daily Cost:** Core workflows (tasks, notes, timers, reminders, system stats, workspace context) run 100% locally and deterministically via SQLite without requiring cloud LLMs.
 - **Instant Keyboard & Voice Access:** Global hotkey (`Ctrl+Space` for production, `Ctrl+Alt+Space` for beta profile) and offline wake word ("Hey Jarvis") with sub-second responsiveness.
-- **Fail-Closed Security:** Rigid Risk 0–3 policy gate preventing arbitrary shell execution, with typed action schemas, cryptographic verification tokens, and durable SQLite receipts.
+- **Fail-Closed Security:** Rigid Risk 0–3 policy gate preventing arbitrary shell execution, with typed action schemas, opaque session verification tokens, and durable SQLite receipts.
 - **Robustness Across Restarts:** Timers, reminders, active workspace context, and chat sessions survive application restarts without loss of state.
 - **Zero-Coupling Voice Interruption:** Utterance-level generational guards and backend pending-interruption handshakes ensuring speaking "Hey Jarvis" immediately silences TTS and begins capturing the user's fresh command without acoustic self-triggering.
 

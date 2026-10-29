@@ -42,3 +42,7 @@ logs/
 Thumbs.db
 .vscode/
 .idea/
+
+# Synthetic fixtures from voice regression runs
+.vega-voice-tests-*/
+voice-lab-local/

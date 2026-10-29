@@ -42,6 +42,7 @@ export function getBetaEnvironment(customRoot = null, runId = null, baseEnv = pr
   const actualRunId = runId || `beta-${crypto.randomUUID()}`
   const betaPort = 8005
   const voiceEnabled = Boolean(options.voice)
+  const ollamaEnabled = Boolean(options.ollama)
 
   const env = {
     ...baseEnv,
@@ -64,6 +65,30 @@ export function getBetaEnvironment(customRoot = null, runId = null, baseEnv = pr
     delete env.VEGA_ENABLE_VOICE
   }
 
+  if (ollamaEnabled) {
+    env.VEGA_BETA_OLLAMA = '1'
+    env.LLM_PROVIDER = 'ollama'
+    // Enforce local loopback endpoint; default to localhost:11434 if unset
+    if (!env.OLLAMA_BASE_URL) {
+      env.OLLAMA_BASE_URL = 'http://localhost:11434'
+    } else {
+      // Loopback check in JS to prevent invalid inherited remote endpoints
+      try {
+        const parsed = new URL(env.OLLAMA_BASE_URL)
+        const host = parsed.hostname.toLowerCase()
+        if (host !== 'localhost' && host !== '127.0.0.1' && host !== '[::1]' && !host.startsWith('127.')) {
+          console.warn(`[VEGA LAUNCHER] Prohibited non-loopback OLLAMA_BASE_URL '${env.OLLAMA_BASE_URL}'; resetting to http://localhost:11434.`)
+          env.OLLAMA_BASE_URL = 'http://localhost:11434'
+        }
+      } catch {
+        env.OLLAMA_BASE_URL = 'http://localhost:11434'
+      }
+    }
+  } else {
+    delete env.VEGA_BETA_OLLAMA
+    env.LLM_PROVIDER = 'none'
+  }
+
   // Discard inherited cloud API keys to guarantee deterministic isolation
   delete env.GEMINI_API_KEY
   delete env.OPENAI_API_KEY
@@ -78,6 +103,7 @@ export function getBetaEnvironment(customRoot = null, runId = null, baseEnv = pr
     betaRoot: paths.betaRoot,
     betaDbPath: paths.betaDbPath,
     voiceEnabled,
+    ollamaEnabled,
   }
 }
 

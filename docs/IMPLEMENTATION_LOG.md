@@ -2,6 +2,16 @@
 
 This is a restart point for Antigravity, not proof that historical handoff claims are current. Add dated entries after actual assessment or implementation. Do not copy secrets or personal data here.
 
+## 2026-10-28 — Resume audit and owner-requested software launch
+
+Preserved HEAD d13b6c3 and the dirty local Ollama milestone. Source/docs review found the opt-in Ollama implementation now exists, superseding the older chat checkpoint. Added docs/PROJECT_STATUS_2026-10-28.md and an offline project-guide dashboard/records. No application edits, commit, push, personal database inspection or .env changes.
+
+Reviewer-executed frontend tests: npm test --prefix frontend -> 81 passed with normal local-socket access (restricted first run: 80 passed, 1 socket-dependent failure). Frontend lint completed without errors; existing warnings remain. Targeted backend: Python 3.14.3 -m pytest backend/tests/test_beta_ollama.py backend/tests/test_beta_profile.py backend/tests/test_command_parser.py backend/tests/test_beta_voice.py -q, fresh workspace TEMP/TMP and --basetemp, normal access -> 62 passed, 1 warning, 23.34s. Restricted backend attempts encountered temp-directory errors and were superseded by that focused run. Full backend suite not run. Previous 72 total for 7+10+45 was an arithmetic error; correct total 62. git -c core.safecrlf=false diff --check passed before and after report edits.
+
+Launch: npm run dev:beta using process-local explicit Python executable (no PATH/.env changes). Initial alias resolution failed, next attempt timed out, retry succeeded with matching beta run identity/database on port 8005 and frontend on 5173. Invoked Ctrl+Alt+Space; native enumeration showed VEGA Dashboard, but screenshot/accessibility capture failed. Frontend/backend requests are observed; visual acceptance is not. Voice/cloud/Ollama disabled in running ordinary beta. Used existing synthetic beta data without reseeding. Vite naturally regenerated dist-electron development files; no production installer build.
+
+Next: fix Ollama HTTP redirect following and the optional one-second provider probe versus 800-ms launcher health budget; then real local-model acceptance. Local /api/tags timed out after two seconds. Acceptance matrix contains 35 NOT RUN rows; previous owner-reported voice success does not establish a full manual pass. Read-only subagent reviewed current Ollama source and mocked test boundaries. See dated report for scope and limitations.
+
 ## 2026-09-24 — preparation by Codex
 
 - Reframed the active project as VEGA AgentOS in the new brief and agent instructions. Application source and package identifiers have not been renamed.
@@ -1603,4 +1613,121 @@ Next owner check: keep Task Matrix on All or Open, send Add a task to review sor
 - **Git Format Check**: `git diff --check` -> **0 errors**.
 
 ### 4. Next Step
-- Milestone complete and verified. Ready for Git commit checkpoint. Next phase is Phase 3: Owner-supervised desktop acceptance using `docs/BETA_ACCEPTANCE_CHECKLIST.md`.
+- Milestone complete and verified in Git checkpoint `d13b6c3`.
+
+---
+
+## 2026-10-05 — Opt-In Local Ollama Beta Mode, Loopback Endpoint Enforcement, and Evidence Boundary Hardening
+
+### 1. Scope, Invariants, and Preservation
+- Implemented bounded local Ollama beta milestone per owner requirements:
+  1. **Deterministic Baseline Intact**: Ordinary beta (`npm run dev:beta`, `npm run dev:beta:voice`) remains strictly deterministic-only (`LLM_PROVIDER=none`, `deterministic_only: true`).
+  2. **Explicit Opt-In Local AI Beta Modes**: Added `--ollama` launcher flag, available standalone (`npm run dev:beta:ollama`) or combined with offline wake-word listener (`npm run dev:beta:ollama:voice`).
+  3. **Strict Loopback Endpoint Security**: Added `validate_loopback_url()` in `backend/providers/ollama.py` and `scripts/launcherHelpers.js` enforcing loopback targets (`localhost`, `127.0.0.1`, `::1`). Prohibited remote hostnames, LAN IPs, and cloud metadata services to prevent SSRF and external leakage.
+  4. **Zero Cloud Fallback**: Cloud credentials (`GEMINI_API_KEY`, etc.) remain strictly stripped in beta mode. Unreachable Ollama or request timeouts (bounded to 30.0s max) surface truthful offline guidance; zero cloud calls or model downloads are attempted.
+  5. **Deterministic Priority & Standard Action Pipeline**: Fast-path deterministic commands resolve immediately before consulting Ollama. Model tool proposals pass through `tool_registry` -> `policy.py` -> `executor` -> `ActionReceipt`, refreshing the mounted Productivity Hub in real-time.
+  6. **Owner-Reported Evidence**: Recorded the owner's successful manual desktop test of voice interruption as owner-reported evidence.
+  7. **Documentation Reconciliations**: Reconciled `TASKS.md`, `ROADMAP.md`, `ANTIGRAVITY_START.md`, `PROJECT.md`, `ARCHITECTURE.md`, and `BETA_ACCEPTANCE_CHECKLIST.md`. Corrected "full backend suite" claims to "targeted suites"; removed unsupported "cryptographic verification" claims.
+- Preserved existing changes, personal databases (`backend/jarvis.db`), `.env`, and builds. No commit or push performed per instructions.
+
+### 2. Sequential Review Limitation
+- As required by project rules, subagent delegation was checked; general coding subagent tools were unavailable in this environment, so bounded read-only reviews for loopback security, provider isolation, and launcher environment propagation were conducted sequentially.
+
+### 3. Files Changed & Added
+- `backend/providers/ollama.py`: Added `is_loopback_host()`, `validate_loopback_url()`, `check_ollama_readiness()`, and bounded 30s timeout.
+- `backend/providers/__init__.py`: Exported loopback validator and readiness probe.
+- `backend/main.py`: Handled `beta_ollama_opt_in`, loopback probe in `GET /health`, and locked `effective_provider` in `POST /chat`.
+- `scripts/launcherHelpers.js`: Added `options.ollama`, non-loopback URL reset, and `ollamaEnabled` return.
+- `scripts/launch_beta.js`: Added `--ollama` CLI flag parsing, launch banner, and probe output.
+- `package.json`: Added `dev:beta:ollama` and `dev:beta:ollama:voice` scripts.
+- `backend/tests/test_beta_ollama.py`: Added 7 comprehensive regression tests.
+- `frontend/tests/launcherValidation.test.js`: Added tests for `--ollama`, combined mode, and inherited flag stripping.
+- `TASKS.md`, `ROADMAP.md`, `PROJECT.md`, `ARCHITECTURE.md`, `docs/ANTIGRAVITY_START.md`, `docs/BETA_ACCEPTANCE_CHECKLIST.md`: Reconciled tasks, milestones, exact commands, and claims.
+
+### 4. Automated Verification Results
+- **Frontend Unit Tests (`node --test`)**: `npm test --prefix frontend` -> **81 passed**, 0 failed in 675ms.
+- **Backend Targeted Regression Suites (`pytest`)**:
+  - `python -m pytest backend/tests/test_beta_ollama.py` -> **7 passed**, 1 warning in 6.68s.
+  - `python -m pytest backend/tests/test_beta_profile.py` -> **10 passed**, 1 warning in 9.78s.
+  - `python -m pytest backend/tests/test_command_parser.py backend/tests/test_beta_voice.py` -> **45 passed**, 1 warning in 19.13s.
+  - Total targeted backend tests: **72 passed**, 1 warning across all active test suites.
+- **Frontend Linter (`oxlint`)**: `npm run lint --prefix frontend` -> **0 errors**, 25 warnings in 111ms.
+- **Git Format Check**: `git diff --check` -> **0 errors**.
+
+### 5. Stop Boundary
+- Opt-in local Ollama beta milestone complete and verified. Stopping before committing or pushing per user instructions.
+
+## 2026-10-28 — Voice-first product research and proposed MVP
+
+- Owner requested a broad review of current models, new architectures and reusable open-source assistants, then selected a voice-first assistant that operates Windows. Budget: free first; optional INR100–300/month if worthwhile. This is a planning milestone, not new desktop functionality.
+- Baseline observed: branch `main`, HEAD `d13b6c3`, existing dirty Ollama/source/docs changes preserved. No application code, credentials, personal database, model assets or builds changed by this research.
+- Added `docs/VEGA_RESEARCH_2026-10-28.md`: primary-source research, Jev claim qualification, model/runtime comparisons, hardware constraints, budget scenarios and reuse recommendation.
+- Added `docs/VEGA_VOICE_PILOT_MVP.md`: five bounded desktop workflows, job cancellation and verification contract, six proposed stages, acceptance gates and a V1 implementation handoff.
+- Recorded proposal `P-001` through the Project Companion `scope` API and regenerated its dashboard. Existing roadmap counts remain 3 complete / 1 in progress / 2 planned; these implementation labels are not native acceptance certification. Proposed Voice Pilot stages are separate: V0 planning complete, V1–V5 not started.
+- A read-only subagent checked voice/execution boundaries. It confirmed that existing speech cancellation does not cancel `/chat` or desktop jobs, the model lane handles one action per request, and app launch verification remains `launch_accepted`. No delegated edits or desktop actions occurred.
+- Created a conversation UI concept in the task-owned visualization directory: `vega-voice-pilot.html`, with Control room and Pilot dock variants. All displayed app state is synthetic; it performs no microphone capture, inference or desktop operation.
+- Validation: inline Node `vm.Script` and DOM-stub checks passed for fragment format, unique element IDs, JavaScript syntax, demo progression, pending verification, stop/reset, and disclosure. This validates local interaction logic, not browser appearance or native behavior. Project Companion `scope`, `validate`, and `render` completed successfully.
+- Application test suites were not rerun for this documentation/concept-only milestone. No framework install, model benchmark, paid API request, credential inspection, commit or push was performed.
+- Final checks: `git diff --check` passed with no whitespace errors (existing LF/CRLF advisory warnings); `git -c core.safecrlf=false diff --check` also passed. `node 'C:\Users\Darshit N\.codex\skills\project-companion\scripts\companion.mjs' validate --project .` passed at guide revision 5. Local links in the two new documents were checked for existence.
+- Next step: V1 bounded driver proof from the new MVP handoff. Compare local driver integration against a small Windows UIA baseline; do not adopt an entire framework or begin the complete redesign before native evidence exists.
+
+## 2026-10-28 — Revised goal-aware desktop companion proposal
+
+- Owner clarified that broad personal autonomy, daily preparation, desktop widgets/cards and easy navigation are the product goal. LeetCode and GSoC preparation starting November 1 are the first proving journey. Calculator/Notepad are internal smoke tests, not the product scope or first visible milestone.
+- Researched primary documentation for Zebar, Rainmeter, Raycast, Motion, Reclaim, Super Productivity, Anki/FSRS, Obsidian, ActivityWatch, Electron, LeetCode study plans and GSoC contributor/AI guidance. Sources and distinctions between reuse and design inspiration are in `docs/VEGA_PERSONAL_OS_PLAN.md`.
+- Added that revised plan with the daily loop, separate habit/solve/review evidence, permissions, reusable capability packs, interface direction, stage gates and a D1 implementation handoff. Marked the earlier research/MVP product ordering as superseded while preserving its technical evidence and history.
+- Registered proposal `P-002` through Project Companion and regenerated the dashboard. P-001 remains as historical research with a supersession note. Accepted legacy stage counts stay 3 complete / 1 in progress / 2 planned. New proposed D0–D5 counts: 1 planning stage complete, 0 implementation stages started, 5 remaining.
+- Read-only subagent reviewed autonomy tiers, learning integrity, feature traps and acceptance gates. No delegated edits, desktop actions, model downloads or account access.
+- Created `vega-goal-desktop.html` in the task visualization directory: Desktop shelf and Focus dock concepts. Changing time budgets, revealing a sample card, creating a preview card, quiet mode and session controls affect only the concept. No automation, reminder, microphone session, desktop widget or learning record was actually created.
+- Validation: inline Node syntax/DOM-stub checks passed for fragment structure, unique IDs, 45/90/150-minute plan totals, reveal/rating, literal-text card creation, quiet/start/hint/pause interactions. This is local interaction validation, not browser layout or Windows acceptance. Project Companion schema validation passed at revision 6.
+- Date calculation: PowerShell `[DateTime]::ParseExact('2026-11-01','yyyy-MM-dd',$null).AddDays(99).ToString('yyyy-MM-dd')` returned `2027-02-08`. This is a local 100-day plan calculation, not a platform badge claim. The official GSoC page reviewed still provided concrete 2026 dates; 2027 deadlines were not invented.
+- Documentation/concept-only work: no application tests rerun, no source changes, no credentials/personal databases/builds modified, no commit/push. Next proposed implementation is D1 from `VEGA_PERSONAL_OS_PLAN.md`; the earlier V1 handoff is superseded as the product's next step.
+
+## 2026-10-28 — Voice endpointing corrections and Hey Vega evaluation preparation
+
+### Priority and scope
+- Owner requested voice-quality/latency work before the broader companion build and selected **Hey Vega**, pronounced **VAY-guh**. Active guide stage S-007 records this work; unfinished S-004 Ollama work is deferred without discarding it. Counts: 3 complete, 1 active, 2 planned, 1 deferred.
+- Baseline `main`, HEAD `d13b6c3`; `backend/voice_service.py` was clean before this run. Existing dirty Ollama/source/docs changes remain preserved. No `.env`, personal database/WAL/backups, credentials or generated build modified; no commit/push.
+
+### Changes
+- `backend/voice_service.py`: consume all complete VAD frames (old short-circuit accumulated stale speech); schedule worker events through the asyncio owner; single-flight model loading; honor the validated custom Whisper path; explicit CPU/CUDA configuration with CPU int8 default; serialize complete lazy decoding; consolidate duplicate enable/disable implementation, preserve interruption cancellation and clear old errors on enable.
+- Added `VEGA_WAKE_PHRASE`, `VEGA_WAKE_MODEL_PATH` and finite/range-validated `VEGA_WAKE_THRESHOLD`. Explicit missing custom artifacts fail closed; they never silently select Jarvis. Existing legacy model-path variable remains compatible. No trained Vega artifact was created or activated.
+- Added `backend/tests/test_voice_pipeline.py` (14 synthetic cases), `scripts/evaluate_voice.py` (local supplied-clip WER/decode/wake evaluation) and `scripts/collect_voice_samples.py` (owner-prompted local capture, no uploads).
+- Added `docs/VOICE_QUALITY_AND_HEY_VEGA.md`: findings, remaining capture lifecycle work, reproducible evaluation process, training/data-split/promotion requirements and selected pronunciation. Updated companion plan with voice-first priority. Git ignores only newly named synthetic voice-test folders and default `voice-lab-local/` recordings; arbitrary custom destinations require their own exclusion.
+
+### Verification
+Interpreter used below: `C:\Users\Darshit N\AppData\Local\Python\pythoncore-3.14-64\python.exe`, invoked in PowerShell with `&` and a quoted path.
+- Restricted initial targeted run: two temporary-fixture errors and native-library stall; interrupted. Not an application pass/fail. Normal-access reruns below completed using synthetic databases and disabled voice.
+- `python -u -m pytest backend/tests/test_voice_pipeline.py -q --basetemp=.vega-voice-tests-targeted`: **6 passed** before additional threshold regressions.
+- `python -u -m pytest backend/tests/test_voice_pipeline.py backend/tests/test_voice_service.py backend/tests/test_beta_voice.py -q --basetemp=.vega-voice-tests-corrected`: **32 passed, 1 warning**.
+- `python -u -m pytest backend/tests/test_voice_pipeline.py backend/tests/test_voice_service.py backend/tests/test_beta_voice.py backend/tests/test_p1_e1_readiness.py::test_voice_service_status_disabled_and_active -q --basetemp=.vega-voice-tests-reviewed`: **33 passed, 1 warning** before eight added threshold/reenable cases.
+- Final `python -u -m pytest -q --tb=short --basetemp=.vega-voice-tests-gate`: **445 passed, 13 failed, 2 warnings**, 67.26s. All 14 new pipeline cases pass. Full-suite success is NOT claimed.
+- Baseline comparison: copied `git show HEAD:backend/voice_service.py` into ignored `.vega-voice-tests-baseline/voice_service.py`, imported it as `voice_service` in a fresh Python process and invoked `pytest.main(['-q','--tb=short','--ignore=backend/tests/test_voice_pipeline.py','--basetemp=.vega-voice-tests-baseline-fixtures'])`. **430 passed, 14 failed, 2 warnings**, 54.43s. All 13 final remaining failures also occur against this original voice file; the baseline additionally fails the duplicate-enable mic event test now corrected. No working-tree reset/revert used.
+- Remaining failures: model-lane idempotency; fast-path receipt/database assertions in P1-B/P1-C1; provider/health and deterministic-command database assertions in P1-E1; two workspace REST tests. Database/module-reload isolation is a likely contributor, not a verified complete diagnosis. They require their own bounded correction milestone.
+- CLI `--help` for both new scripts passed without recording or loading models. Evaluator word-error smoke checks passed. AST parsing of the three Python source files and `git -c core.safecrlf=false diff --check` passed.
+- Read-only subagent reviewed changed source and identified threshold consistency and evaluator/production event-count differences; both were addressed in configuration/docs. No delegated edits or native tests.
+
+### Evidence boundaries and next step
+- No microphone capture, real-audio ASR benchmark, GPU inference, model download, synthetic training-data generation or wake-model training was run. No ChatGPT-equivalent accuracy or measured live speedup is claimed.
+- The VAD fix is independently covered with eight seconds of synthetic speech followed by silence. This is not an owner-accent or room-noise evaluation.
+- Remaining work includes pre-roll/onset preservation, bounded transcription admission and stale-result invalidation, stream reset/reconnect, calibration readiness, audio overruns, browser-device mapping and verified-local VAD loading. Serial decoding alone does not bound waiting threads. Offline wake-event metrics do not reproduce production reset/capture transitions.
+- Next required owner input: prompted consented local recordings using the collector, with sessions split before augmentation. Next engineering step: capture lifecycle/pre-roll correction, then versioned genuine Hey Vega training and held-out/native evaluation. The stage remains in progress. Existing Jarvis behavior stays the default until a real evaluated Vega artifact is configured.
+
+## 2026-10-28 — Owner recordings measured and Colab training prepared
+
+- Owner completed `validation-01`: 45 WAVs and manifest confirmed. Local format/amplitude checks found readable16kHz mono PCM16, nonzero audio and no clipped samples. Original files unchanged; `validation-freeze.json` stores hashes and validation-only provenance. Owner confirmed clip-031's reference mismatch (Hey Vega / pause or cutoff), so excluded only from ASR metrics, not deleted or relabelled as a correct command.
+- Ran `scripts/evaluate_voice.py` against a derived ASR-only manifest using existing small.en CPU/int8 assets, normal Windows native-library access, no uploads or action dispatch. Full10-clip median1.731s; cold load13.25s. Eligible9-clip comparison: beam1 WER9/62=14.5%, median1.727s; separate same-model beam5 trial8/62=12.9%, median1.873s. Number-format differences count as raw WER edits. Limited one-session data does not establish general accuracy or live latency. No production decoding change.
+- CUDA runtime probe reported1 device and compute types. Actual `WHISPER_DEVICE=cuda`, `WHISPER_COMPUTE_TYPE=int8_float16` trial failed at encoder execution: `cublas64_12.dll` missing/unloadable. No local libraries installed; CPU behavior retained. Detailed local reports remain ignored with recordings.
+- Read-only training audit found inference assets but no complete training environment or synthetic training corpus. Owner selected free Google Colab synthetic/public training with local evaluation. Validation recordings were not reused for training.
+- Downloaded and inspected only the small official training notebook, pinning openWakeWord commit368c03716d1e92591906a84949bc477f3a834455 and Piper commit2971426a55072f7d22fec416ca7800df8bd23207. Public dataset metadata identifies17,280,000,128-byte training features and184,836,608-byte validation features. No datasets downloaded locally.
+- Added `docs/HEY_VEGA_COLAB.ipynb` and `docs/VOICE_VALIDATION_2026-10-28.md`. Notebook wraps the pinned upstream workflow in an isolated Python3.10 kernel with explicit preparation/download prompts, Hey Vega target/near phrases, experimental artifact metadata and local download. No owner-audio upload or Drive-mount cell. Wrapper syntax/JSON and selected public dependency constraints checked; remote dependency resolution, data generation, training and accuracy remain unexecuted/unverified.
+- No application source changed in this continuation, so application suites were not rerun. Next step: owner executes the prepared notebook in Colab, then return the actual experimental ONNX for local validation. Capture lifecycle/pre-roll work and real GPU library setup remain outstanding. Stage S-007 remains in progress; no trained wake artifact or successful live voice acceptance claimed.
+
+## 2026-10-29 — Owner-authorized Git checkpoint publication
+
+- Owner explicitly requested pushing recent changes. Branch main initially had one unpushed commit (`d13b6c3`) plus uncommitted Ollama, voice, research, training preparation and guide updates. Fetched origin; no remote-only commits observed. No reset, stash, clean, force-push or personal-data modification.
+- Reviewed outgoing file inventory and credential patterns in candidate files/outgoing tracked diff. No matching secrets or embedded audio found; notebook outputs/execution counts empty. Raw recordings, local evaluation logs/manifests, model files, personal database and .env excluded. Pattern scanning is not a guarantee of absence.
+- Read-only review found stale current-milestone claims. Updated resume guide, TASKS and ROADMAP with active voice work, deferred Ollama limitations, unexecuted training and last full-suite failures; corrected historical targeted total72 to62 where it was presented as current guidance.
+- `npm test --prefix frontend`: restricted localhost fixture initially failed; normal-access rerun **81 passed, 0 failed**.
+- `python -u -m pytest backend/tests/test_voice_pipeline.py backend/tests/test_voice_service.py backend/tests/test_beta_voice.py backend/tests/test_beta_ollama.py -q --basetemp=.vega-voice-tests-prepush`: **47 passed, 1 warning**, 53.34s; synthetic models/databases, no microphone or desktop launches.
+- `git -c core.safecrlf=false diff --check`: passed. Last full backend result remains **445 passed / 13 failed** from October28, with failures also reproduced against original voice code. This publication is an unfinished development checkpoint, not a verified release. No new training, installer build or live desktop acceptance performed.

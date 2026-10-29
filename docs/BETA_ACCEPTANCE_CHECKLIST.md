@@ -68,6 +68,30 @@ npm run dev:beta:voice
 
 ---
 
+### B3. Launch Beta Local AI Session (Opt-in Local Ollama Mode)
+```powershell
+# Launch owned beta session with loopback Ollama conversational intelligence enabled
+npm run dev:beta:ollama
+```
+*Visual indicators of success:*
+- Launcher banner reports: `Local AI: Local Ollama opt-in active`
+- Header badge: `BETA PROFILE · PORT 8005`
+- Conversational queries ("Explain binary search trees") route to local Ollama (`executionMode: local`) without cloud calls.
+- Deterministic commands ("add a task...", "timer 10m") continue resolving instantly before consulting the model.
+
+---
+
+### B4. Launch Beta Combined Local AI + Voice Session
+```powershell
+# Launch owned beta session with both local Ollama and local wake-word & Whisper mic active
+npm run dev:beta:ollama:voice
+```
+*Visual indicators of success:*
+- Launcher banner reports: `Local AI: Local Ollama opt-in active` and `Voice Mode: Voice acceptance requested`
+- Wake phrase "Hey Jarvis" captures user speech; conversational requests route to local Ollama; spoken interruption immediately silences TTS.
+
+---
+
 ### C. Window Hide vs. Actual Application Quit
 - **Hide on Close / Blur:** Clicking the title bar `X`, pressing `Ctrl+Alt+Space`, or clicking outside in `Hotkey Overlay` mode merely **hides** the window to the system tray (`hide-on-close`). The backend and Electron process stay active in the background.
 - **Actual Application Quit:** To terminate the session cleanly, either:
@@ -141,6 +165,10 @@ Status options: `NOT RUN` | `PASS` | `FAIL` | `DEFERRED` | `UNVERIFIED`.
 | **NOT-03** | Toast Deduplication | Trigger repeated alert | Dev / Packaged | Deduplicator suppresses duplicate OS banner within TTL window | NOT RUN | |
 | **NOT-04** | Truthful Claims Audit | Inspect notification event payload | Dev | Status reports `accepted` (`api_accepted`), never falsely claims user observed rendering until clicked | NOT RUN | |
 | **PTT-01** | Voice / Wake Word | Test voice test mode (`npm run dev:beta:voice`) vs default (`npm run dev:beta`) | Dev | In `dev:beta`, mic is disabled by default; in `dev:beta:voice`, "Hey Jarvis" wake-word listens offline. Toggling off releases mic stream. Cloud stays disabled. | NOT RUN | |
+| **PTT-02** | Voice Interruption | Say "Hey Jarvis" while VEGA speaks TTS playback | Dev | Cancels TTS playback immediately, clears ducking, enters listening mode for user's fresh command | PASS (Owner-Reported) | Verified on host desktop during manual testing |
+| **OLL-01** | Local Ollama Readiness | Launch via `dev:beta:ollama` with Ollama on `localhost:11434` | Dev | Banner reports Local AI active; /health detects installed models on loopback; non-loopback URLs refused | NOT RUN | |
+| **OLL-02** | Local AI Conversation | Send conversational request ("Explain quicksort algorithms") | Dev | Local model generates response offline; executionMode reports local; zero cloud API calls | NOT RUN | |
+| **OLL-03** | Local AI Tool Proposal | Ask model to add a task ("Add task: review lecture 4") | Dev | Model proposal validated by policy; ActionReceipt stored in SQLite; mounted ProductivityHub updates immediately | NOT RUN | |
 | **WIN-01** | Window Hotkey | Press `Ctrl+Alt+Space` repeatedly | Dev / Packaged | Smoothly hides and shows overlay without stolen focus or flickering | NOT RUN | |
 | **WIN-02** | Maximize / Restore | Click Maximize button (or `F11`) | Dev / Packaged | Expands to full screen / work-area; click again restores exact pre-maximized bounds | NOT RUN | |
 | **WIN-03** | Actual Quit vs Hide | Test `X` (hides) vs Tray -> Quit (exits) | Dev / Packaged | `X` hides to tray; tray Quit terminates window and owned backend process | NOT RUN | |

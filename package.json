@@ -12,7 +12,9 @@
     "build:win": "npm run build:backend && npm run build --prefix frontend && npm run pack --prefix frontend",
     "seed:beta": "node scripts/seed_beta.js",
     "dev:beta": "node scripts/launch_beta.js",
-    "dev:beta:voice": "node scripts/launch_beta.js --voice"
+    "dev:beta:voice": "node scripts/launch_beta.js --voice",
+    "dev:beta:ollama": "node scripts/launch_beta.js --ollama",
+    "dev:beta:ollama:voice": "node scripts/launch_beta.js --ollama --voice"
   },
   "dependencies": {
     "concurrently": "^8.2.2"

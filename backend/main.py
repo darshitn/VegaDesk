@@ -124,7 +124,12 @@ else:
     # Scrub any inherited cloud keys so cloud inference or paid services are never contacted
     for key in ["GEMINI_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GROQ_API_KEY", "MISTRAL_API_KEY"]:
         os.environ.pop(key, None)
-    os.environ["LLM_PROVIDER"] = "none"
+    # Beta local Ollama opt-in mode: strictly opt-in via VEGA_BETA_OLLAMA=1 (set by launcher with --ollama)
+    beta_ollama_opt_in = os.getenv("VEGA_BETA_OLLAMA", "").strip() in ("1", "true", "yes")
+    if beta_ollama_opt_in:
+        os.environ["LLM_PROVIDER"] = "ollama"
+    else:
+        os.environ["LLM_PROVIDER"] = "none"
     # Beta voice acceptance mode: strictly opt-in via VEGA_BETA_VOICE=1 (set by launcher with --voice)
     # Inherited environment flags like VEGA_ENABLE_VOICE must NOT enable voice in beta profile
     os.environ.pop("VEGA_ENABLE_VOICE", None)
@@ -172,8 +177,12 @@ def health_check(diagnostics: bool = False):
 
     # 4. Provider state
     is_beta = os.getenv("VEGA_PROFILE") == "beta"
+    beta_ollama = is_beta and (os.getenv("VEGA_BETA_OLLAMA", "").strip() in ("1", "true", "yes"))
     env_provider = os.getenv("LLM_PROVIDER")
-    if is_beta or env_provider == "none":
+
+    if is_beta:
+        configured_provider = "ollama" if beta_ollama else "none"
+    elif env_provider == "none":
         configured_provider = "none"
     elif LLM_PROVIDER != os.getenv("LLM_PROVIDER", "gemini"):
         configured_provider = (LLM_PROVIDER or "gemini").lower()
@@ -195,29 +204,24 @@ def health_check(diagnostics: bool = False):
             provider_status = "configured"
     elif configured_provider == "ollama":
         configured_model = (os.getenv("OLLAMA_MODEL", "llama3") or "").strip()
-        base_url = (os.getenv("OLLAMA_BASE_URL", "http://localhost:11434") or "").rstrip("/")
-        provider_status = "configured"
+        raw_base_url = (os.getenv("OLLAMA_BASE_URL", "http://localhost:11434") or "").rstrip("/")
+        try:
+            from providers.ollama import validate_loopback_url, check_ollama_readiness
+        except ImportError:
+            from .providers.ollama import validate_loopback_url, check_ollama_readiness
 
-        # Explicit optional diagnostics: bounded local Ollama metadata check ONLY if requested
-        if diagnostics:
-            try:
-                resp = requests.get(f"{base_url}/api/tags", timeout=0.5)
-                if resp.status_code == 200:
-                    data = resp.json()
-                    models = [m.get("name", "") for m in data.get("models", [])]
-                    model_found = any(
-                        configured_model == m or m.startswith(f"{configured_model}:")
-                        for m in models
-                    )
-                    provider_status = "ready" if model_found else "missing_model"
-                    if not model_found:
-                        provider_error = f"Model '{configured_model}' not found in local Ollama tags."
-                else:
-                    provider_status = "unavailable"
-                    provider_error = f"Ollama HTTP {resp.status_code}"
-            except Exception:
-                provider_status = "unavailable"
-                provider_error = "Ollama is not reachable on local port."
+        try:
+            base_url = validate_loopback_url(raw_base_url)
+            # In beta profile with Ollama opt-in or when diagnostics requested, probe local Ollama /api/tags
+            if diagnostics or (is_beta and beta_ollama):
+                readiness = check_ollama_readiness(base_url, configured_model, timeout_s=1.0)
+                provider_status = readiness["status"]
+                provider_error = readiness.get("error")
+            else:
+                provider_status = "configured"
+        except ValueError as ve:
+            provider_status = "unavailable"
+            provider_error = str(ve)
     elif configured_provider == "none":
         provider_status = "disabled"
         provider_error = None
@@ -243,9 +247,10 @@ def health_check(diagnostics: bool = False):
         "status": overall_status,
         "voice": voice_ok,
         "voice_test_mode": bool(is_beta and (os.getenv("VEGA_BETA_VOICE", "").strip() in ("1", "true", "yes") or os.getenv("VEGA_ENABLE_VOICE", "").strip() in ("1", "true", "yes"))),
+        "ollama_test_mode": bool(beta_ollama),
         "profile": profile_name,
         "run_id": run_id,
-        "deterministic_only": is_beta or configured_provider == "none",
+        "deterministic_only": bool(not beta_ollama and (is_beta or configured_provider == "none")),
         "database": {
             "status": db_status,
             "checked_at": now_iso,
@@ -317,7 +322,13 @@ def chat_endpoint(req: ChatRequest, db: Session = Depends(get_db)):
     #    bounded context -> registry-validated proposal -> the SAME executor
     #    and receipts the deterministic path uses. One action per request.
     user_name = req.userName.strip() if req.userName and req.userName.strip() else "Sir"
-    effective_provider = "none" if (os.getenv("VEGA_PROFILE") == "beta") else (req.provider.lower() if req.provider else LLM_PROVIDER)
+    is_beta = os.getenv("VEGA_PROFILE") == "beta"
+    beta_ollama = is_beta and (os.getenv("VEGA_BETA_OLLAMA", "").strip() in ("1", "true", "yes"))
+    if is_beta:
+        effective_provider = "ollama" if beta_ollama else "none"
+    else:
+        req_provider = req.provider.lower() if req.provider else None
+        effective_provider = req_provider if req_provider else (LLM_PROVIDER or "gemini").lower()
     out = model_lane.run_model_turn(
         SessionLocal, SYSTEM_CLOCK, req.message, req.history,
         user_name=user_name,
