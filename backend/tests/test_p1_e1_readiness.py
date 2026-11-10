@@ -63,7 +63,7 @@ def test_health_preserves_legacy_and_adds_readiness(client):
 
     assert "provider" in data
     assert "name" in data["provider"]
-    assert data["provider"]["status"] in ("configured", "unconfigured", "ready", "unavailable")
+    assert data["provider"]["status"] in ("configured", "unconfigured", "ready", "unavailable", "disabled")
 
 
 def test_health_database_failure_degrades_status(client, monkeypatch):
@@ -140,6 +140,7 @@ def test_health_optional_diagnostics_ollama(client, monkeypatch):
     import requests
 
     monkeypatch.setattr(main, "LLM_PROVIDER", "ollama")
+    monkeypatch.setenv("LLM_PROVIDER", "ollama")
 
     # Regular health check does NOT contact Ollama
     probed = []

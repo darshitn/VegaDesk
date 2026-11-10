@@ -212,8 +212,9 @@ def health_check(diagnostics: bool = False):
 
         try:
             base_url = validate_loopback_url(raw_base_url)
-            # In beta profile with Ollama opt-in or when diagnostics requested, probe local Ollama /api/tags
-            if diagnostics or (is_beta and beta_ollama):
+            # Startup /health is a fast identity and DB check. Only explicit
+            # diagnostics may wait for local model metadata.
+            if diagnostics:
                 readiness = check_ollama_readiness(base_url, configured_model, timeout_s=1.0)
                 provider_status = readiness["status"]
                 provider_error = readiness.get("error")
@@ -577,7 +578,11 @@ def set_voice_enabled(req: VoiceEnabledRequest):
         return {
             "enabled": False,
             "status": False,
-            "error": "Voice service disabled in current profile (launch with npm run dev:beta:voice to enable voice test mode)"
+            "error": (
+                "Voice is disabled in this session. Relaunch VEGA with --voice to request local microphone capture. Existing local voice models are required."
+                if os.getenv("VEGA_PACKAGED") == "1" else
+                "Voice service disabled in current profile (launch with npm run dev:beta:voice to enable voice test mode)"
+            )
         }
     voice_service.set_voice_enabled(bool(req.enabled))
     return {"enabled": bool(req.enabled), "status": voice_service.is_voice_active()}

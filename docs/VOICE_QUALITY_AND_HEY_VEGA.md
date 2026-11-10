@@ -4,6 +4,8 @@
 
 > Update: owner recordings have now been received and locally measured. See [first validation assessment](VOICE_VALIDATION_2026-10-28.md) and [prepared Colab notebook](HEY_VEGA_COLAB.ipynb). Historical “not performed yet” statements below describe the initial correction run; no custom model has been trained yet.
 
+> 8 November update: Colab is paused by owner request. Ordinary wake capture now retains the detection chunk once, with the same VAD path and an exact sample limit; interruption ACK purging remains separate. Monotonic logs measure capture processing and decoder duration separately. Production-loop regressions use fake audio/models. Native onset, accuracy and acoustic end-to-end latency still require owner acceptance.
+
 ## Current evidence and first fixes
 
 VEGA already uses faster-whisper (`small.en`, CPU int8, English, beam size 1). Adding Whisper is not the missing step. Two independent things need evaluation: speech transcription and wake detection. A wake classifier is not a transcription model.
@@ -17,9 +19,9 @@ Installed package metadata observed: faster-whisper 1.2.1, CTranslate2 4.8.1, op
 ## What remains before calling capture quality fixed
 
 - Measure end-of-speech delay, decoder time and total time separately on the same recordings. The new offline evaluator measures decoding, not live endpoint latency.
-- Ordinary wake currently drops its detection chunk and has no pre-roll; very immediate commands can lose their onset. A bounded pre-roll needs testing and wake-prefix handling. Never reuse pre-acknowledgement/TTS audio during interruption.
+- Ordinary wake now retains its detection chunk, fixing a specific 80ms onset loss. Audio before the detection chunk still has no pre-roll; wake detector lag may lose earlier speech. A bounded pre-roll needs native evidence and wake-prefix handling. Never reuse pre-acknowledgement/TTS audio during interruption.
 - Recording is command-oriented: one-second silence timeout, 15-second cap. Longer dictation needs a separate mode, pause handling and visible finish/cancel controls.
-- Capture/queue lifecycle needs a dedicated correction: bounded transcription admission, stale-result invalidation after disable/reconnect, reset on every stream exit, device-change reconnect and overrun reporting. A serialization lock prevents competing decoders but does not bound waiting request threads.
+- Capture/queue lifecycle correction completed (3 November 2026): bounded transcription admission (at most ONE background wake worker, busy status rejection), session generation binding, stale-result invalidation across disable/reenable, mic device change, stream reconnect, and last client disconnect. Invalidation verified before decode, after decode, on async enqueue callback, and immediately before delivery. Remaining capture lifecycle work: pre-roll/onset preservation and overrun reporting. A serialization lock prevents competing decoders while admission bounds background workers.
 - Initial mic calibration currently discards two seconds while claiming ready. The energy estimate can be contaminated by speech. Readiness and robust calibration need native tests.
 - `_load_silero_vad()` still uses torch.hub and can fetch code/assets if uncached. Replace it with verified local assets before claiming entirely offline startup. No voice startup was performed in this run.
 - Browser manual capture uses its own default device, separate from the backend mic selection; device mapping, audio processing and request cleanup need review.

@@ -111,20 +111,8 @@ def resolve_beta_db_path() -> str:
     If not, defaults to %APPDATA%/Jarvis_Dashboard_Beta/db/jarvis-beta.db.
     """
     custom_root = os.getenv("VEGA_PROFILE_ROOT")
-    jarvis_db_path = os.getenv("JARVIS_DB_PATH")
-
-    if jarvis_db_path:
-        # Strict validation: fails closed if invalid or pointing to production
-        return validate_beta_db_path(jarvis_db_path, custom_root=custom_root)
-
     beta_root = custom_root or get_default_beta_root()
-    real_root = os.path.realpath(os.path.abspath(beta_root))
-
-    # Guard against invalid root
-    if os.path.dirname(real_root) == real_root:
-        raise ValueError(f"Invalid beta root '{real_root}'.")
-
-    beta_db_dir = os.path.join(real_root, "db")
-    os.makedirs(beta_db_dir, exist_ok=True)
-    target = os.path.join(beta_db_dir, "jarvis-beta.db")
-    return validate_beta_db_path(target, custom_root=real_root)
+    target = os.getenv("JARVIS_DB_PATH") or os.path.join(beta_root, "db", "jarvis-beta.db")
+    validated_target = validate_beta_db_path(target, custom_root=beta_root)
+    os.makedirs(os.path.dirname(validated_target), exist_ok=True)
+    return validated_target

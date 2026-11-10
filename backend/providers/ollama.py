@@ -86,7 +86,8 @@ def check_ollama_readiness(base_url: str = None, model: str = None, timeout_s: f
         }
 
     try:
-        resp = requests.get(f"{valid_url}/api/tags", timeout=max(0.2, timeout_s))
+        resp = requests.get(f"{valid_url}/api/tags", timeout=max(0.2, timeout_s),
+                            allow_redirects=False)
         if resp.status_code == 200:
             data = resp.json()
             models = [m.get("name", "") for m in data.get("models", [])]
@@ -198,13 +199,15 @@ class OllamaProvider(BaseProvider):
         bounded_timeout = min(max(timeout_s, 1.0), 30.0)
         try:
             resp = requests.post(f"{self.base_url}/api/chat", json=payload,
-                                 timeout=bounded_timeout)
+                                 timeout=bounded_timeout, allow_redirects=False)
         except requests.exceptions.Timeout:
             raise ProviderTimeout(f"Local model '{self.model}' timed out after {bounded_timeout:.1f}s. Try a shorter request.")
         except requests.exceptions.ConnectionError:
             raise ProviderUnavailable(
                 f"Ollama is not reachable on {self.base_url}. Ensure the local Ollama service is running.")
 
+        if 300 <= resp.status_code < 400:
+            raise ProviderUnavailable("Ollama redirected the request; local-only inference refused.")
         if resp.status_code in (401, 403):
             raise ProviderAuth(f"Ollama rejected the request (HTTP {resp.status_code}).")
         if resp.status_code == 429:

@@ -45,6 +45,85 @@ _enabled.set()  # wake-word listening is on by default; UI can turn it off to
                 # release the mic (classic-BT headsets then leave HFP and their
                 # audio playback quality returns to normal)
 
+# Lifecycle token / session generation:
+# Bounded transcription admission & stale-result invalidation
+_session_lock = threading.Lock()
+_session_generation: int = 1
+_device_generation: int = 0
+_stream_reconnect_requested: bool = False
+_active_audio_q: Optional[Any] = None
+_active_oww: Optional[Any] = None
+_capture_reset_flag: threading.Event = threading.Event()
+
+_transcription_admission_lock = threading.Lock()
+_transcription_busy: bool = False
+
+
+def get_session_generation() -> int:
+    """Return the current lifecycle session token."""
+    with _session_lock:
+        return _session_generation
+
+
+def _invalidate_session(reason: str = "") -> int:
+    """Increment lifecycle session generation, invalidating prior captures/results."""
+    global _session_generation
+    with _session_lock:
+        _session_generation += 1
+        gen = _session_generation
+    _log(f"[VOICE] Session invalidated ({reason or 'unspecified'}). Generation -> {gen}")
+    return gen
+
+
+def is_session_valid(token: Optional[int]) -> bool:
+    """Check if token matches current lifecycle generation and voice is enabled."""
+    if token is None or not _enabled.is_set():
+        return False
+    with _session_lock:
+        return token == _session_generation
+
+
+def _reset_capture_models():
+    """Reset openWakeWord prediction buffers and Silero VAD hidden states."""
+    global _active_oww, _vad_model
+    if _active_oww is not None:
+        try:
+            _active_oww.reset()
+        except Exception:
+            pass
+    if _vad_model is not None and hasattr(_vad_model, "reset_states"):
+        try:
+            _vad_model.reset_states()
+        except Exception:
+            pass
+
+
+def _reset_capture_state():
+    """Request capture reset and drain audio queue. Actual model state reset
+    runs in the owning audio thread at reset/open/exit boundaries."""
+    _capture_reset_flag.set()
+    cancel_interruption("capture state reset")
+    q = _active_audio_q
+    if q is not None:
+        while not q.empty():
+            try:
+                q.get_nowait()
+            except Exception:
+                break
+
+
+def is_transcription_busy() -> bool:
+    """Check if a background wake transcription worker is currently occupied."""
+    with _transcription_admission_lock:
+        return _transcription_busy
+
+
+def _release_transcription_admission():
+    """Release the single background wake transcription worker slot."""
+    global _transcription_busy
+    with _transcription_admission_lock:
+        _transcription_busy = False
+
 # Ducking: while VEGA's own text-to-speech is playing, the browser tells us to
 # ignore the mic so the speaker output can never wake the listener or be
 # transcribed back as a user command. A safety expiry re-arms the mic even if
@@ -232,13 +311,15 @@ def set_voice_enabled(enabled: bool):
     mic stream and idles; when re-enabled it reopens and recalibrates."""
     global _voice_error
     if enabled:
+        _invalidate_session("voice enabled by user")
         _enabled.set()
         _voice_error = ""
         _log("[VOICE] Wake-word listening enabled by user.")
         _enqueue({"type": "mic", "listening": False, "note": "Restarting microphone..."})
     else:
         _enabled.clear()
-        cancel_interruption("voice disabled by user")
+        _invalidate_session("voice disabled by user")
+        _reset_capture_state()
         _log("[VOICE] Wake-word listening disabled by user (mic closed).")
         _set_mic_listening(False, "Wake word off")
 
@@ -270,8 +351,13 @@ _device_override: str = ""
 def set_mic_device(name: str):
     """Set the preferred microphone at runtime (no restart required — takes
     effect on the next stream reconnect, which is triggered automatically)."""
-    global _device_override
-    _device_override = (name or "").strip()
+    global _device_override, _stream_reconnect_requested, _device_generation
+    with _session_lock:
+        _device_override = (name or "").strip()
+        _device_generation += 1
+        _stream_reconnect_requested = True
+    _invalidate_session(f"mic device set to {_device_override!r}")
+    _reset_capture_state()
     _log(f"[VOICE] Runtime mic device set to: {_device_override!r}")
 
 
@@ -337,19 +423,44 @@ def unregister_client(ws):
             _clients.remove(ws)
             if len(_clients) == 0:
                 cancel_interruption("all clients disconnected")
+                _invalidate_session("all clients disconnected")
+                _reset_capture_state()
 
 def _enqueue(event: dict):
-    """Thread-safe push into the async event queue."""
-    if _event_queue is not None:
+    """Thread-safe push of unscoped event into the async event queue."""
+    _enqueue_scoped(event, session_token=None)
+
+
+def _enqueue_scoped(event: dict, session_token: Optional[int] = None):
+    """Thread-safe push into the async event queue with session gating."""
+    if _event_queue is None:
+        return
+
+    # Check validity before scheduling callback
+    if session_token is not None and not is_session_valid(session_token):
+        return
+
+    event_payload = dict(event)
+    if session_token is not None:
+        event_payload["_session_token"] = session_token
+
+    def _delivery_callback():
+        # Check validity on async enqueue callback
+        if session_token is not None and not is_session_valid(session_token):
+            return
         try:
-            if _event_loop is None:
-                # Supports standalone synchronous consumers before start().
-                # The running service always installs its owner loop first.
-                _event_queue.put_nowait(event)
-            else:
-                _event_loop.call_soon_threadsafe(_event_queue.put_nowait, event)
+            _event_queue.put_nowait(event_payload)
         except RuntimeError:
             pass
+
+    try:
+        if _event_loop is None or not _event_loop.is_running():
+            # Supports standalone synchronous consumers before start().
+            _delivery_callback()
+        else:
+            _event_loop.call_soon_threadsafe(_delivery_callback)
+    except RuntimeError:
+        pass
 
 # ──────────────────────────────────────────────
 # Silero VAD helper (lightweight ONNX model)
@@ -357,12 +468,18 @@ def _enqueue(event: dict):
 _vad_model = None
 
 def _load_silero_vad():
-    """Load Silero VAD via torch hub (or ONNX fallback). Lazy, may fail offline."""
+    """Use an existing local Silero checkout, otherwise use the energy fallback."""
     global _vad_model
     try:
         import torch
+        from pathlib import Path
+        checkouts = sorted(Path(torch.hub.get_dir()).glob("snakers4_silero-vad_*"))
+        checkout = next((path for path in checkouts if (path / "hubconf.py").is_file()), None)
+        if checkout is None:
+            raise RuntimeError("No cached local Silero VAD checkout")
         model, utils = torch.hub.load(
-            repo_or_dir='snakers4/silero-vad',
+            repo_or_dir=str(checkout),
+            source='local',
             model='silero_vad',
             force_reload=False,
             onnx=True,
@@ -430,8 +547,13 @@ def resolve_wake_word_model() -> Optional[str]:
     if get_wake_phrase().lower() != "hey jarvis":
         return None
     try:
-        import openwakeword
-        oww_dir = os.path.dirname(openwakeword.__file__)
+        # Artifact discovery also runs on /health. Locate the package without
+        # executing its native audio/ML imports on a voice-disabled startup.
+        from importlib.util import find_spec
+        spec = find_spec("openwakeword")
+        if spec is None or spec.origin is None:
+            return None
+        oww_dir = os.path.dirname(spec.origin)
         candidates = [
             os.path.join(oww_dir, "resources", "models", "hey_jarvis_v0.1.onnx"),
             os.path.join(oww_dir, "resources", "models", "hey_jarvis.onnx"),
@@ -584,7 +706,7 @@ def check_voice_readiness() -> dict:
 # ──────────────────────────────────────────────
 def _audio_thread():
     """Runs in a dedicated thread. Captures mic, detects wake word, records, transcribes."""
-    global _voice_active, _voice_error, _last_near_miss_log
+    global _voice_active, _voice_error, _last_near_miss_log, _active_audio_q, _stream_reconnect_requested, _session_generation
     import queue
     try:
         wake_threshold = get_wake_threshold()
@@ -622,6 +744,8 @@ def _audio_thread():
     try:
         _log(f"[VOICE] Loading local openWakeWord model from '{wake_model_path}'...")
         oww = OWWModel(wakeword_models=[wake_model_path], inference_framework="onnx" if wake_model_path.endswith(".onnx") else "tflite")
+        global _active_oww
+        _active_oww = oww
         _log(f"[VOICE] Wake word model loaded. Configured phrase: '{get_wake_phrase()}'.")
     except Exception as e:
         _log(f"[VOICE] Failed to load wake word model: {e}")
@@ -636,8 +760,10 @@ def _audio_thread():
     vad_buffer = np.zeros(0, dtype=np.float32)  # rolling buffer feeding Silero 512-sample frames
     silence_start = 0.0
     record_start = 0.0
+    recorded_samples = 0
 
     audio_q: queue.Queue = queue.Queue(maxsize=100)
+    _active_audio_q = audio_q
 
     def callback(indata, frames, time_info, status):
         if status:
@@ -661,7 +787,23 @@ def _audio_thread():
                 _log("[VOICE] Microphone closed (wake-word listening disabled).")
             time.sleep(0.5)
             continue
+
+        with _session_lock:
+            _stream_reconnect_requested = False
+            dev_intent = _device_generation
+
         dev_idx, dev_name = _resolve_input_device()
+
+        with _session_lock:
+            if _device_generation != dev_intent or _stream_reconnect_requested:
+                # Device changed during resolution; discard stale resolution and retry immediately
+                continue
+            _session_generation += 1
+            stream_session = _session_generation
+
+        _log(f"[VOICE] Session invalidated (mic stream open on {dev_name}). Generation -> {stream_session}")
+        _reset_capture_models()
+        record_session = stream_session
         try:
             with sd.InputStream(
                 device=dev_idx,
@@ -671,6 +813,10 @@ def _audio_thread():
                 blocksize=CHUNK_SAMPLES,
                 callback=callback,
             ):
+                with _session_lock:
+                    if _device_generation != dev_intent or _stream_reconnect_requested:
+                        # Device changed while opening InputStream; continue to reopen next stream
+                        continue
                 _log(f"[VOICE] Microphone stream open on '{dev_name}'. Wake word listener active.")
                 _set_mic_listening(True)
                 retry_delay = 5
@@ -708,8 +854,29 @@ def _audio_thread():
                 threading.Thread(target=_preload_whisper, daemon=True, name="jarvis-whisper-preload").start()
 
                 while True:
-                    if not _enabled.is_set():
-                        break  # closes the stream via the with-block
+                    with _session_lock:
+                        if not _enabled.is_set() or _stream_reconnect_requested or _device_generation != dev_intent:
+                            break  # closes the stream via the with-block
+                    if not is_session_valid(stream_session):
+                        break
+
+                    if _capture_reset_flag.is_set():
+                        _capture_reset_flag.clear()
+                        recording = False
+                        recorded_frames = []
+                        vad_buffer = np.zeros(0, dtype=np.float32)
+                        _reset_capture_models()
+                        while not audio_q.empty():
+                            try:
+                                audio_q.get_nowait()
+                            except Exception:
+                                break
+                    if recording and not is_session_valid(record_session):
+                        _log(f"[VOICE] In-progress recording invalidated by session change ({record_session}).")
+                        recording = False
+                        recorded_frames = []
+                        vad_buffer = np.zeros(0, dtype=np.float32)
+                        _reset_capture_models()
                     try:
                         audio = audio_q.get(timeout=0.2)
                     except queue.Empty:
@@ -731,15 +898,16 @@ def _audio_thread():
                                 break
                         recorded_frames = []
                         vad_buffer = np.zeros(0, dtype=np.float32)
-                        if _vad_model is not None and hasattr(_vad_model, "reset_states"):
-                            try:
-                                _vad_model.reset_states()
-                            except Exception:
-                                pass
+                        _reset_capture_models()
+                        if not is_session_valid(stream_session):
+                            _log(f"[VOICE] Dropping interruption arm: stream session {stream_session} is no longer valid.")
+                            continue
                         recording = True
+                        record_session = stream_session
+                        recorded_samples = 0
                         silence_start = 0.0
-                        record_start = time.time()
-                        _enqueue({"type": "listening"})
+                        record_start = time.monotonic()
+                        _enqueue_scoped({"type": "listening"}, record_session)
                         _log("[VOICE] Clean command recording armed after verified interrupt ack.")
                         continue
 
@@ -759,6 +927,7 @@ def _audio_thread():
                             recording = False
                             recorded_frames = []
                             vad_buffer = np.zeros(0, dtype=np.float32)
+                            _reset_capture_models()
                             _log("[VOICE] Dropped in-progress recording (VEGA is speaking).")
 
                         # While VEGA is speaking: keep ordinary speech capture suppressed.
@@ -788,6 +957,7 @@ def _audio_thread():
                                     break
                             recorded_frames = []
                             vad_buffer = np.zeros(0, dtype=np.float32)
+                            _reset_capture_models()
                         continue
 
                     if not recording:
@@ -803,8 +973,13 @@ def _audio_thread():
 
                         if wake_fired(oww.prediction_buffer, wake_threshold):
                             oww.reset()
+                            if not is_session_valid(stream_session):
+                                _log(f"[VOICE] Dropping wake detection: stream session {stream_session} is no longer valid.")
+                                continue
                             recording = True
+                            record_session = stream_session
                             recorded_frames = []
+                            recorded_samples = 0
                             vad_buffer = np.zeros(0, dtype=np.float32)
                             if _vad_model is not None and hasattr(_vad_model, "reset_states"):
                                 try:
@@ -812,9 +987,9 @@ def _audio_thread():
                                 except Exception:
                                     pass
                             silence_start = 0.0
-                            record_start = time.time()
-                            _enqueue({"type": "wake"})
-                            _enqueue({"type": "listening"})
+                            record_start = time.monotonic()
+                            _enqueue_scoped({"type": "wake"}, record_session)
+                            _enqueue_scoped({"type": "listening"}, record_session)
                         else:
                             top_score = 0.0
                             for score in oww.prediction_buffer.values():
@@ -827,9 +1002,16 @@ def _audio_thread():
                                 _log(f"[VOICE] Near-miss wake score {top_score:.2f} "
                                      f"(threshold {wake_threshold}) — if these never climb, "
                                      f"check the mic level/device.")
-                    else:
+                    # An ordinary wake must retain its detection chunk exactly
+                    # once. The ACK/pending/ducking branches above still continue,
+                    # so pre-ACK speaker audio never reaches this common path.
+                    if recording:
+                        remaining_samples = max(0, int(MAX_RECORD_SECS * SAMPLE_RATE) - recorded_samples)
+                        audio = audio[:remaining_samples]
                         recorded_frames.append(audio)
-                        elapsed = time.time() - record_start
+                        recorded_samples += len(audio)
+                        now = time.monotonic()
+                        elapsed = now - record_start
 
                         # Silero VAD requires exactly 512-sample frames at 16 kHz
                         # and raises on the 1280-sample chunks — feed it through a
@@ -840,32 +1022,31 @@ def _audio_thread():
                             silence_start = 0.0
                         else:
                             if silence_start == 0.0:
-                                silence_start = time.time()
-                            elif (time.time() - silence_start) >= SILENCE_TIMEOUT:
+                                silence_start = now
+                            elif (now - silence_start) >= SILENCE_TIMEOUT:
                                 recording = False
-                                _enqueue({"type": "processing"})
                                 frames_copy = recorded_frames.copy()
                                 recorded_frames = []
-                                threading.Thread(
-                                    target=_transcribe_and_dispatch,
-                                    args=(frames_copy,),
-                                    daemon=True
-                                ).start()
+                                _log(f"[VOICE TIMING] endpoint=silence capture_processing_seconds={elapsed:.3f} "
+                                     f"silence_processing_seconds={now - silence_start:.3f} "
+                                     f"audio_seconds={recorded_samples / SAMPLE_RATE:.3f}; "
+                                     "processing times exclude device/queue age and UI delivery")
+                                _submit_transcription(frames_copy, record_session)
                                 continue
 
-                        if elapsed >= MAX_RECORD_SECS:
+                        if elapsed >= MAX_RECORD_SECS or recorded_samples >= int(MAX_RECORD_SECS * SAMPLE_RATE):
                             recording = False
-                            _enqueue({"type": "processing"})
                             frames_copy = recorded_frames.copy()
                             recorded_frames = []
-                            threading.Thread(
-                                target=_transcribe_and_dispatch,
-                                args=(frames_copy,),
-                                daemon=True
-                            ).start()
+                            _log(f"[VOICE TIMING] endpoint=limit capture_processing_seconds={elapsed:.3f} "
+                                 f"audio_seconds={recorded_samples / SAMPLE_RATE:.3f}; "
+                                 "processing time excludes device/queue age and UI delivery")
+                            _submit_transcription(frames_copy, record_session)
 
         except Exception as e:
             # Handle PortAudio errors gracefully without killing backend
+            _invalidate_session(f"audio stream error: {e}")
+            _reset_capture_state()
             err_str = str(e).lower()
             if "no input" in err_str or "device" in err_str or "portaudio" in err_str:
                 _log(f"[VOICE] Microphone not available: {e}. Retrying in {retry_delay}s...")
@@ -939,7 +1120,7 @@ def _transcribe_source_locked(src):
     Returns the cleaned transcript ('' for silence/hallucination fillers).
     """
     model = _get_whisper()
-    t0 = time.time()
+    t0 = time.monotonic()
     segments, info = model.transcribe(
         src,
         beam_size=1,
@@ -953,8 +1134,9 @@ def _transcribe_source_locked(src):
     )
     raw = " ".join(seg.text for seg in segments).strip()
     trimmed = getattr(info, "duration_after_vad", None) or getattr(info, "duration", 0)
-    _log(f"[VOICE] Transcribed {trimmed:.1f}s of audio (after VAD trim) "
-         f"in {time.time()-t0:.1f}s")
+    _log(f"[VOICE TIMING] decode_seconds={time.monotonic()-t0:.3f} "
+         f"audio_after_vad_seconds={trimmed:.3f}; excludes model load, "
+         "lock wait, capture and delivery")
     return filter_hallucination(raw)
 
 
@@ -970,8 +1152,56 @@ def _audio_to_wav_bytes(audio_np):
     return buf
 
 
-def _transcribe_and_dispatch(frames: list[np.ndarray]):
+def _submit_transcription(frames: list[np.ndarray], session_token: int) -> bool:
+    """Submit recorded audio for transcription under session_token.
+    Enforces at most ONE accepted background transcription worker.
+    Rejects additional recordings while busy with an honest status.
+    """
+    if not is_session_valid(session_token):
+        _log(f"[VOICE] Dropping recording from stale session {session_token}")
+        return False
+
+    with _transcription_admission_lock:
+        global _transcription_busy
+        if _transcription_busy:
+            _log("[VOICE] Transcription worker busy; dropping additional recording")
+            _enqueue_scoped(
+                {"type": "status", "text": "Transcription busy; recording dropped"},
+                session_token,
+            )
+            return False
+        _transcription_busy = True
+
+    try:
+        _enqueue_scoped({"type": "processing"}, session_token)
+        t = threading.Thread(
+            target=_transcribe_worker,
+            args=(frames, session_token),
+            daemon=True,
+            name="jarvis-transcribe-worker",
+        )
+        t.start()
+        return True
+    except Exception as e:
+        _release_transcription_admission()
+        _log(f"[VOICE] Failed to start transcription worker: {e}")
+        _enqueue_scoped({"type": "error", "text": "Failed to start transcription worker"}, session_token)
+        return False
+
+
+def _transcribe_worker(frames: list[np.ndarray], session_token: int):
+    try:
+        _transcribe_and_dispatch(frames, session_token)
+    finally:
+        _release_transcription_admission()
+
+
+def _transcribe_and_dispatch(frames: list[np.ndarray], session_token: Optional[int] = None):
     """Transcribe recorded audio and push result to WebSocket clients."""
+    if session_token is not None and not is_session_valid(session_token):
+        _log(f"[VOICE] Stale session {session_token} before decode; suppressing transcription.")
+        return
+
     try:
         audio = np.concatenate(frames) if frames else np.zeros(0, dtype=np.float32)
         peak = float(np.max(np.abs(audio))) if len(audio) else 0.0
@@ -980,23 +1210,34 @@ def _transcribe_and_dispatch(frames: list[np.ndarray]):
             # False wake / dead capture: tell the UI honestly instead of
             # burning ~15s of CPU transcribing silence.
             _log(f"[VOICE] {reason} (peak {peak:.4f}) — skipping transcription")
-            _enqueue({"type": "status", "text": reason})
+            if session_token is None or is_session_valid(session_token):
+                _enqueue_scoped({"type": "status", "text": reason}, session_token)
+            return
+
+        if session_token is not None and not is_session_valid(session_token):
+            _log(f"[VOICE] Stale session {session_token} before Whisper decode; suppressing.")
             return
 
         # Clip to [-1, 1] before int16 conversion to avoid overflow
         audio = np.clip(audio, -1.0, 1.0)
         transcript = transcribe_source(_audio_to_wav_bytes(audio))
 
+        # Check validity after decoding!
+        if session_token is not None and not is_session_valid(session_token):
+            _log(f"[VOICE] Stale session {session_token} after decode; suppressing transcript {transcript!r}")
+            return
+
         if transcript:
             _log(f"[VOICE] Transcript: {transcript}")
-            _enqueue({"type": "transcript", "text": transcript})
+            _enqueue_scoped({"type": "transcript", "text": transcript}, session_token)
         else:
             _log("[VOICE] Empty transcript")
-            _enqueue({"type": "status", "text": "No speech detected"})
+            _enqueue_scoped({"type": "status", "text": "No speech detected"}, session_token)
 
     except Exception as e:
         _log(f"[VOICE] Transcription error: {e}")
-        _enqueue({"type": "error", "text": str(e)[:200]})
+        if session_token is None or is_session_valid(session_token):
+            _enqueue_scoped({"type": "error", "text": str(e)[:200]}, session_token)
 
 # ──────────────────────────────────────────────
 # Async dispatcher (runs in the FastAPI event loop)
@@ -1005,10 +1246,26 @@ async def _dispatch_events():
     """Read from the event queue and broadcast to all connected WS clients."""
     while True:
         event = await _event_queue.get()
-        dead = []
+        token = event.pop("_session_token", None)
+        if token is not None and not is_session_valid(token):
+            # Stale session; suppress delivery to newly connected or existing clients
+            continue
+
         with _lock:
             clients_snapshot = list(_clients)
+
+        # Boundary documentation:
+        # Locks are not held across await. If an individual ws.send_json is already
+        # in-flight across the network when an invalidation occurs, that transmission
+        # completes and cannot be recalled once on the wire.
+        # However, token validity is rechecked immediately before EACH client send,
+        # ensuring that if send suspends and session is invalidated, subsequent clients
+        # receive nothing.
+        dead = []
         for ws in clients_snapshot:
+            if token is not None and not is_session_valid(token):
+                # Stale session invalidated while sending to earlier client(s)
+                break
             try:
                 await ws.send_json(event)
             except Exception:

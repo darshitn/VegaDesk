@@ -167,11 +167,12 @@ export function probeHealth(
   expectedRunId,
   expectedProfile = 'beta',
   timeoutMs = 800,
-  httpModule = http
+  httpModule = http,
+  diagnostics = false
 ) {
   return new Promise((resolve) => {
     const req = httpModule.get(
-      `http://127.0.0.1:${port}/health`,
+      `http://127.0.0.1:${port}/health${diagnostics ? '?diagnostics=1' : ''}`,
       { timeout: timeoutMs },
       (res) => {
         let body = ''

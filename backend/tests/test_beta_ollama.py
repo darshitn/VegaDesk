@@ -17,6 +17,7 @@ import importlib
 import pytest
 from unittest.mock import patch, MagicMock
 from fastapi.testclient import TestClient
+from beta_test_isolation import isolated_bootstrap
 
 backend_dir = os.path.dirname(os.path.dirname(__file__))
 if backend_dir not in sys.path:
@@ -51,6 +52,7 @@ def beta_ollama_env(tmp_path):
     importlib.reload(db)
 
 
+@isolated_bootstrap
 def test_ordinary_beta_remains_deterministic_only(beta_ollama_env):
     """Ordinary beta (without VEGA_BETA_OLLAMA) must force deterministic-only mode."""
     os.environ.pop("VEGA_BETA_OLLAMA", None)
@@ -82,6 +84,7 @@ def test_ordinary_beta_remains_deterministic_only(beta_ollama_env):
     assert "deterministic-only" in chat_data.get("response", "").lower() or "offline" in chat_data.get("response", "").lower()
 
 
+@isolated_bootstrap
 def test_beta_opt_in_ollama_mode_activation(beta_ollama_env):
     """Beta profile with VEGA_BETA_OLLAMA=1 enables Ollama while scrubbing cloud keys."""
     os.environ["VEGA_BETA_OLLAMA"] = "1"
@@ -104,7 +107,7 @@ def test_beta_opt_in_ollama_mode_activation(beta_ollama_env):
         "models": [{"name": "llama3:latest"}, {"name": "qwen2.5:latest"}]
     }
 
-    with patch("requests.get", return_value=fake_tags_resp):
+    with patch("requests.get", return_value=fake_tags_resp) as probe:
         health_res = client.get("/health")
         assert health_res.status_code == 200
         health_data = health_res.json()
@@ -112,8 +115,14 @@ def test_beta_opt_in_ollama_mode_activation(beta_ollama_env):
         assert health_data["deterministic_only"] is False
         assert health_data["ollama_test_mode"] is True
         assert health_data["provider"]["name"] == "ollama"
-        assert health_data["provider"]["status"] == "ready"
+        assert health_data["provider"]["status"] == "configured"
         assert health_data["provider"]["model"] == "llama3"
+        probe.assert_not_called()
+
+        diagnostics = client.get("/health?diagnostics=1")
+        assert diagnostics.status_code == 200
+        assert diagnostics.json()["provider"]["status"] == "ready"
+        probe.assert_called_once()
 
 
 def test_loopback_url_validation():
@@ -189,6 +198,7 @@ def test_check_ollama_readiness_probes():
     assert "Non-loopback host" in res_remote["error"]
 
 
+@isolated_bootstrap
 def test_deterministic_commands_precede_ollama_in_beta(beta_ollama_env):
     """Deterministic commands are answered by dispatcher without consulting Ollama."""
     os.environ["VEGA_BETA_OLLAMA"] = "1"
@@ -210,6 +220,7 @@ def test_deterministic_commands_precede_ollama_in_beta(beta_ollama_env):
         mock_post.assert_not_called()
 
 
+@isolated_bootstrap
 def test_model_proposal_pipeline_and_receipt(beta_ollama_env):
     """When Ollama returns a tool call, it executes via tool_registry -> policy -> ActionReceipt."""
     os.environ["VEGA_BETA_OLLAMA"] = "1"
@@ -258,6 +269,7 @@ def test_model_proposal_pipeline_and_receipt(beta_ollama_env):
             assert t is not None
 
 
+@isolated_bootstrap
 def test_unreachable_ollama_returns_friendly_error_no_cloud_fallback(beta_ollama_env):
     """When Ollama is unreachable, returns friendly offline explanation with zero cloud calls."""
     os.environ["VEGA_BETA_OLLAMA"] = "1"

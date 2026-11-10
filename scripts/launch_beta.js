@@ -141,13 +141,16 @@ async function main() {
 
   console.log(`[VEGA LAUNCHER] Backend verified ready! (profile=beta, run_id=${runId})`)
   if (ollamaEnabled) {
-    const prov = readyProbe?.data?.provider
+    // The identity/DB gate above must remain fast even when Ollama is slow.
+    // Probe model metadata separately and never gate the beta desktop on it.
+    const diagnosticProbe = await probeHealth(betaPort, runId, 'beta', 2500, undefined, true)
+    const prov = diagnosticProbe.ok ? diagnosticProbe.data.provider : null
     if (prov?.status === 'ready') {
       console.log(`[VEGA LAUNCHER] Local Ollama verified ready! (model: ${prov.model || 'installed'})`)
     } else if (prov?.status === 'missing_model') {
       console.log(`[VEGA LAUNCHER] Local Ollama reachable, but model '${prov.model}' is not installed in local tags.`)
     } else {
-      const err = prov?.error || prov?.status || 'unreachable'
+      const err = prov?.error || prov?.status || diagnosticProbe.reason || 'unreachable'
       console.log(`[VEGA LAUNCHER] Local Ollama note: ${err}`)
     }
   }

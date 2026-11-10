@@ -6,6 +6,7 @@ import importlib
 import pytest
 from datetime import datetime, timezone
 from fastapi.testclient import TestClient
+from beta_test_isolation import isolated_bootstrap
 
 # Ensure backend root is on sys.path
 backend_dir = os.path.dirname(os.path.dirname(__file__))
@@ -55,6 +56,25 @@ def test_seed_beta_safety_refusal():
     finally:
         if old_profile:
             os.environ["VEGA_PROFILE"] = old_profile
+
+
+def test_resolve_beta_db_creates_parent_after_validation(tmp_path, monkeypatch):
+    from beta_target import resolve_beta_db_path
+
+    root = tmp_path / "fresh-beta"
+    target = root / "db" / "jarvis-beta.db"
+    monkeypatch.setenv("VEGA_PROFILE", "beta")
+    monkeypatch.setenv("VEGA_PROFILE_ROOT", str(root))
+    outside = tmp_path / "outside" / "jarvis-beta.db"
+    monkeypatch.setenv("JARVIS_DB_PATH", str(outside))
+
+    with pytest.raises(ValueError):
+        resolve_beta_db_path()
+    assert not outside.parent.exists()
+
+    monkeypatch.setenv("JARVIS_DB_PATH", str(target))
+    assert resolve_beta_db_path() == str(target.resolve())
+    assert target.parent.is_dir()
 
 
 def test_inherited_personal_db_override_rejected_before_writes(tmp_path):
@@ -108,6 +128,7 @@ def test_reject_substring_only_beta_and_escaped_roots(tmp_path):
         os.environ.update(saved_env)
 
 
+@isolated_bootstrap
 def test_seed_preserves_user_edits_and_alerts_on_reseed(beta_test_db):
     """Reseeding must preserve user-created rows, active timers/reminders/alerts, and user modifications."""
     import seed_beta
@@ -191,6 +212,7 @@ def test_seed_preserves_user_edits_and_alerts_on_reseed(beta_test_db):
         assert reminders[0].text == "Submit evaluation form"
 
 
+@isolated_bootstrap
 def test_seed_beta_idempotence_and_content(beta_test_db):
     """Verify that seed_beta creates the synthetic entities and is completely idempotent on re-run."""
     import seed_beta
@@ -254,6 +276,7 @@ def test_seed_beta_idempotence_and_content(beta_test_db):
         assert ws_count == 1
 
 
+@isolated_bootstrap
 def test_beta_health_endpoint_reports_profile(beta_test_db):
     """Verify that /health reports non-secret profile identity and deterministic mode in beta."""
     from main import app
@@ -268,6 +291,7 @@ def test_beta_health_endpoint_reports_profile(beta_test_db):
     assert data["database"]["status"] == "ready"
 
 
+@isolated_bootstrap
 def test_beta_chat_refuses_cloud_inference(beta_test_db):
     """Verify that in beta mode, chat requests do not route to cloud models even if requested."""
     from main import app
@@ -286,8 +310,15 @@ def test_beta_chat_refuses_cloud_inference(beta_test_db):
     assert "deterministic" in data.get("response", "").lower() or "offline" in data.get("response", "").lower()
 
 
-def test_no_dotenv_loading_in_beta(beta_test_db):
-    """Verify that when VEGA_PROFILE=beta, inherited cloud keys are scrubbed and LLM_PROVIDER is none."""
+@isolated_bootstrap
+def test_no_dotenv_loading_in_beta(beta_test_db, monkeypatch):
+    """Beta bootstrap never calls dotenv and scrubs inherited cloud keys."""
+    import dotenv
+
+    def unexpected_dotenv(*args, **kwargs):
+        pytest.fail("Beta bootstrap tried to load the personal dotenv file")
+
+    monkeypatch.setattr(dotenv, "load_dotenv", unexpected_dotenv)
     os.environ["GEMINI_API_KEY"] = "inherited_fake_secret_key"
     os.environ["VEGA_PROFILE"] = "beta"
 
@@ -298,6 +329,7 @@ def test_no_dotenv_loading_in_beta(beta_test_db):
     assert main.LLM_PROVIDER == "none"
 
 
+@isolated_bootstrap
 def test_seed_beta_preserves_user_edits_without_duplication(beta_test_db):
     """Verify that editing a seeded task title does not recreate the original task on reseed."""
     import seed_beta

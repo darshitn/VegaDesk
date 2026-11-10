@@ -11,6 +11,37 @@ import time
 import numpy as np
 
 import voice_service as vs
+from types import SimpleNamespace
+
+
+def test_silero_uses_only_existing_local_checkout(tmp_path, monkeypatch):
+    import sys
+    checkout = tmp_path / "snakers4_silero-vad_cached"
+    checkout.mkdir()
+    (checkout / "hubconf.py").write_text("# synthetic cached checkout")
+    calls = []
+    model = object()
+    def load(**kwargs):
+        calls.append(kwargs)
+        return model, None
+    monkeypatch.setitem(sys.modules, "torch", SimpleNamespace(hub=SimpleNamespace(
+        get_dir=lambda: str(tmp_path), load=load)))
+    monkeypatch.setattr(vs, "_vad_model", None)
+    vs._load_silero_vad()
+    assert vs._vad_model is model
+    assert calls[0]["source"] == "local"
+    assert calls[0]["repo_or_dir"] == str(checkout)
+
+
+def test_missing_silero_cache_falls_back_without_download(tmp_path, monkeypatch):
+    import sys
+    def forbidden_load(**kwargs):
+        raise AssertionError("No cached checkout must never invoke hub.load")
+    monkeypatch.setitem(sys.modules, "torch", SimpleNamespace(hub=SimpleNamespace(
+        get_dir=lambda: str(tmp_path), load=forbidden_load)))
+    monkeypatch.setattr(vs, "_vad_model", object())
+    vs._load_silero_vad()
+    assert vs._vad_model is None
 
 
 def _drain(q):

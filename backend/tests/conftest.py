@@ -17,6 +17,9 @@ _TMP_DIR = tempfile.mkdtemp(prefix="vega_pytest_")
 os.environ["JARVIS_DB_PATH"] = os.path.join(_TMP_DIR, "test.db")
 os.environ["VEGA_DISABLE_VOICE"] = "1"
 os.environ["VEGA_DISABLE_RADAR"] = "1"  # keep the daily AI Radar network job off in tests
+# Status endpoints resolve the wake artifact even with capture disabled. An
+# explicit synthetic path keeps them from importing native openWakeWord/torch.
+os.environ["VEGA_WAKE_MODEL_PATH"] = os.path.join(_TMP_DIR, "unused-wake-model.onnx")
 
 import pytest  # noqa: E402
 

@@ -377,7 +377,7 @@ def test_chat_question_not_misrouted_to_tasks(client, db, monkeypatch):
     monkeypatch.setenv("OLLAMA_BASE_URL", "http://127.0.0.1:1")
     reset_providers()
     try:
-        r = client.post("/chat", json={"message": "what is the capital of France"})
+        r = client.post("/chat", json={"message": "what is the capital of France", "provider": "ollama"})
         assert r.status_code == 200
         body = r.json()
         assert body["receipt"] is None, f"chat must not execute anything: {body}"
