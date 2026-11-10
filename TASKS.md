@@ -1,10 +1,10 @@
 # V.E.G.A. (AgentOS) — Task Tracking
 
-## Current priority — voice reliability and Hey Vega (29 October 2026)
+## Current priority — Windows beta acceptance (8 November 2026)
 
-Voice work is in progress; [current findings and remaining tasks](docs/VOICE_QUALITY_AND_HEY_VEGA.md). Owner recordings were measured and the Colab notebook was prepared, but training and native wake acceptance have not run. The last full backend suite had 445 passed / 13 failed, with remaining failures reproduced against the original voice module.
+The four reliability corrections are implemented with a green full backend suite (478 tests), 82 frontend tests and a scratch production build. Native task creation, timer toast and restart persistence were observed. Physical tray/shortcut restoration and microphone acceptance remain open. Colab is paused by owner request. See the [current resume guide](docs/ANTIGRAVITY_START.md) for exact evidence and remaining work.
 
-Ollama work below is a deferred implementation checkpoint. Redirect handling, readiness timeout alignment and hostname validation remain unresolved; the existing loopback check is not complete isolation assurance. See [current resume guide](docs/ANTIGRAVITY_START.md).
+Ollama core health and model diagnostics now use separate requests, and metadata/inference refuse redirects. JS/Python hostname validation alignment and live local-model acceptance remain separate work.
 
 ## Historical implementation checklist: Phase 2.5 — Opt-In Local Ollama Beta Mode
 

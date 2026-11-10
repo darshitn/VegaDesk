@@ -1,9 +1,10 @@
 # -*- mode: python ; coding: utf-8 -*-
+import os
 
 
 a = Analysis(
-    ['run.py'],
-    pathex=[],
+    [os.path.join(SPECPATH, 'run.py')],
+    pathex=[SPECPATH],
     binaries=[],
     datas=[],
     hiddenimports=[

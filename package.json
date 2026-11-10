@@ -1,6 +1,6 @@
 {
   "name": "jarvis-dashboard",
-  "version": "1.0.0",
+  "version": "0.1.0-beta.1",
   "description": "Vega Dashboard Desktop App",
   "type": "module",
   "scripts": {
@@ -8,8 +8,9 @@
     "dev:frontend": "npm run dev --prefix frontend",
     "dev:backend": "python -m uvicorn backend.main:app --reload --port 8000",
     "dev": "concurrently \"npm run dev:backend\" \"npm run dev:frontend\"",
-    "build:backend": "pyinstaller --name jarvis-backend --onefile --distpath dist backend/run.py",
-    "build:win": "npm run build:backend && npm run build --prefix frontend && npm run pack --prefix frontend",
+    "build:backend": "node scripts/build_release.js --backend-only",
+    "build:win": "node scripts/build_release.js",
+    "build:win:dir": "node scripts/build_release.js --dir",
     "seed:beta": "node scripts/seed_beta.js",
     "dev:beta": "node scripts/launch_beta.js",
     "dev:beta:voice": "node scripts/launch_beta.js --voice",

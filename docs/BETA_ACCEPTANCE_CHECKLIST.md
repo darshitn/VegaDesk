@@ -160,7 +160,7 @@ Status options: `NOT RUN` | `PASS` | `FAIL` | `DEFERRED` | `UNVERIFIED`.
 | **CHT-01** | Chat Persistence | Type message, change theme, switch views | Dev / Packaged | Messages retained across theme changes, tab switching, and window hide/restore | NOT RUN | |
 | **CHT-02** | Command Distinction | Type mutating command vs read-only query | Dev / Packaged | Mutating intent (`add task:...`) produces action receipt; read-only query (`get today`) returns message without receipt | NOT RUN | |
 | **RES-01** | Stale Read / Offline | Terminate backend process briefly while UI open | Dev / Packaged | Note: Wi-Fi disconnect does not sever loopback! Terminating backend surfaces amber stale warning without UI blanking; recovers upon backend restart | NOT RUN | |
-| **NOT-01** | Timer & Toast (Visible) | Create 5s timer with window visible | Dev / Packaged | Timer counts down; in-app banner toast appears; audio plays if enabled | NOT RUN | |
+| **NOT-01** | Timer & Toast (Visible) | Create 5s timer with window visible | Dev / Packaged | Timer counts down; in-app banner toast appears; audio plays if enabled | PASS (Dev) | 7 Nov: actual scratch beta, chat timer 15s; native window screenshot showed the in-app toast and completed alert history. Speech was muted. Packaged behavior unverified. |
 | **NOT-02** | Timer & Toast (Hidden) | Create 5s timer, hide window (`Ctrl+Alt+Space`) | Dev / Packaged | Native Windows toast dispatched via Electron; clicking toast restores & focuses window | NOT RUN | |
 | **NOT-03** | Toast Deduplication | Trigger repeated alert | Dev / Packaged | Deduplicator suppresses duplicate OS banner within TTL window | NOT RUN | |
 | **NOT-04** | Truthful Claims Audit | Inspect notification event payload | Dev | Status reports `accepted` (`api_accepted`), never falsely claims user observed rendering until clicked | NOT RUN | |
@@ -169,10 +169,10 @@ Status options: `NOT RUN` | `PASS` | `FAIL` | `DEFERRED` | `UNVERIFIED`.
 | **OLL-01** | Local Ollama Readiness | Launch via `dev:beta:ollama` with Ollama on `localhost:11434` | Dev | Banner reports Local AI active; /health detects installed models on loopback; non-loopback URLs refused | NOT RUN | |
 | **OLL-02** | Local AI Conversation | Send conversational request ("Explain quicksort algorithms") | Dev | Local model generates response offline; executionMode reports local; zero cloud API calls | NOT RUN | |
 | **OLL-03** | Local AI Tool Proposal | Ask model to add a task ("Add task: review lecture 4") | Dev | Model proposal validated by policy; ActionReceipt stored in SQLite; mounted ProductivityHub updates immediately | NOT RUN | |
-| **WIN-01** | Window Hotkey | Press `Ctrl+Alt+Space` repeatedly | Dev / Packaged | Smoothly hides and shows overlay without stolen focus or flickering | NOT RUN | |
+| **WIN-01** | Window Hotkey | Press `Ctrl+Alt+Space` repeatedly | Dev / Packaged | Smoothly hides and shows overlay without stolen focus or flickering | UNVERIFIED | 7 Nov: hide observed. Hidden-window targeting failed; restored via single-instance handoff. 8 Nov helper initialization failed. Physical shortcut restoration remains open. |
 | **WIN-02** | Maximize / Restore | Click Maximize button (or `F11`) | Dev / Packaged | Expands to full screen / work-area; click again restores exact pre-maximized bounds | NOT RUN | |
 | **WIN-03** | Actual Quit vs Hide | Test `X` (hides) vs Tray -> Quit (exits) | Dev / Packaged | `X` hides to tray; tray Quit terminates window and owned backend process | NOT RUN | |
-| **RST-01** | Restart Persistence | Quit and relaunch `npm run dev:beta` | Dev / Packaged | All added tasks, completed states, window bounds, and theme survive restart intact | NOT RUN | |
+| **RST-01** | Restart Persistence | Quit and relaunch `npm run dev:beta` | Dev / Packaged | All added tasks, completed states, window bounds, and theme survive restart intact | UNVERIFIED | 7 Nov: actual window showed task/chat/alert history after relaunch. 8 Nov: API independently confirmed same synthetic task persisted after another launcher restart. Other row criteria remain open. |
 | **SCL-01** | DPI Scaling (100%) | Test display at 100% Windows scaling | Dev / Packaged | Fonts crisp, borders aligned, no clipped buttons or overflowing cards | NOT RUN | |
 | **SCL-02** | DPI Scaling (125%) | Test display at 125% Windows scaling | Dev / Packaged | Elements scale proportionally; no layout breakdown | NOT RUN | |
 | **SCL-03** | DPI Scaling (150%) | Test display at 150% Windows scaling | Dev / Packaged | High-DPI layout readable; navigation and scrollbars accessible | NOT RUN | |
@@ -181,7 +181,7 @@ Status options: `NOT RUN` | `PASS` | `FAIL` | `DEFERRED` | `UNVERIFIED`.
 | **PRF-01** | Idle Resource Usage | Measure CPU & RAM when idle (5 min) | Dev / Packaged | Record average CPU % and Private Working Set RAM with host hardware context | NOT RUN | |
 | **PRF-02** | Hidden Resource Usage | Measure CPU & RAM when hidden (5 min) | Dev / Packaged | Verify background throttling reduces CPU load compared to visible rendering | NOT RUN | |
 | **PRF-03** | Latency Measurement | Measure typed deterministic command latency | Dev / Packaged | Repeat 5 times; record min / avg / max execution latency in milliseconds | NOT RUN | |
-| **PRC-01** | Process Teardown | Exit via tray Quit and check port 8005 | Dev | No orphaned processes remain; port 8005 freed immediately | NOT RUN | |
+| **PRC-01** | Process Teardown | Exit via tray Quit and check port 8005 | Dev | No orphaned processes remain; port 8005 freed immediately | UNVERIFIED | Alt+F4 triggered real launcher shutdown and freed both ports on 7 Nov. Actual built preload/main Quit IPC passed against a synthetic health server on 8 Nov. Physical tray Quit remains open. |
 
 ---
 

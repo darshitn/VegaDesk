@@ -1,10 +1,12 @@
 # Antigravity: current run and resume guide
 
-## Current checkpoint — 29 October 2026
+## Current checkpoint — 8 November 2026
 
-Active work is voice reliability and the **Hey Vega** wake phrase; see [voice work](VOICE_QUALITY_AND_HEY_VEGA.md) and [recording assessment](VOICE_VALIDATION_2026-10-28.md). The Colab notebook is prepared but unexecuted, and no custom Vega wake model has been trained or accepted. Existing Jarvis remains the default until an actual evaluated artifact is configured.
+The owner paused Colab and authorized four reliability corrections. Beta database parents are created after path validation, fresh beta profiles default to Pinned Desktop, Settings exposes Quit VEGA, and the beta hide tooltip names Ctrl+Alt+Space. Existing saved display modes still apply. Beta bootstrap tests execute their original assertions and fixtures in isolated Python processes. Ordinary wake capture retains its detection chunk exactly once and respects the audio sample limit. Artifact discovery avoids native imports on the health path. Core health and explicit Ollama model diagnostics use separate requests; provider requests refuse redirects.
 
-The last full backend run was **445 passed, 13 failed**. The remaining failures also reproduced using the original voice module; this is not a release-ready or all-green checkpoint. Local Ollama work is deferred: HTTP redirects, launcher/readiness timeout alignment and hostname validation still need correction. Do not treat initial loopback URL validation as a complete local-only guarantee. GPU Whisper inference failed because `cublas64_12.dll` was missing/unloadable. Preserve recordings, credentials, personal data and existing work.
+Latest independent full backend run: **478 passed, 2 warnings**. Frontend: **82 passed**. Lint exits 0 with existing warnings. A full renderer/main/preload production build passed in a scratch checkout. A production Electron integration check exercised the actual preload, Pinned Desktop default and main-frame Quit IPC against a synthetic health server. Both test ports were free afterward. Earlier native observations include the beta window, task creation via chat, a 15-second in-app toast and task/chat/alert persistence after restart.
+
+Remaining acceptance includes physical tray Quit, shortcut restoration, Windows scaling, native notification rendering/click and real-microphone onset/latency. The desktop-control helper failed to initialize after interruption. Timing logs distinguish capture processing from decoder duration; acoustic end-to-end latency remains unmeasured. Colab is paused, Hey Jarvis remains the default, and no trained Hey Vega artifact exists. The proposed study card follows the desktop acceptance gate. See [implementation log](IMPLEMENTATION_LOG.md), [voice findings](VOICE_QUALITY_AND_HEY_VEGA.md) and [acceptance checklist](BETA_ACCEPTANCE_CHECKLIST.md). Preserve all existing local edits and personal data.
 
 ## Historical agent report — 5 October 2026
 

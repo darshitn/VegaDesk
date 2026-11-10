@@ -1,6 +1,6 @@
 # V.E.G.A. (AgentOS) — Development Roadmap
 
-> Current checkpoint, 29 October 2026: active voice reliability/Hey Vega work is in progress; Ollama hardening is deferred. The broader desktop companion is a proposal in [the revised product plan](docs/VEGA_PERSONAL_OS_PLAN.md). Historical completed labels below describe implementation, not current full-suite or native release acceptance. See [resume guide](docs/ANTIGRAVITY_START.md) for known failures and training status.
+> Current checkpoint, 8 November 2026: four beta reliability corrections are implemented; full backend 478 passed and frontend 82 passed. Physical desktop and microphone acceptance remain open, and Colab is paused. The broader desktop companion and study card remain proposals in [the revised product plan](docs/VEGA_PERSONAL_OS_PLAN.md). See the [resume guide](docs/ANTIGRAVITY_START.md) for evidence and the next acceptance steps.
 
 ## Phase 0: Discovery & Architecture Reality Audit (Completed)
 - [x] Audit legacy codebase and distinguish actual behavior from aspirational docs.
