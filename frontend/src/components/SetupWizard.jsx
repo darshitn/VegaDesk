@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { motion } from 'framer-motion'
 import { Cpu } from 'lucide-react'
 
@@ -8,9 +8,21 @@ import { getApiBase } from '../lib/apiConfig.js'
 export default function SetupWizard({ onComplete }) {
   const [step, setStep] = useState(1)
   const [formData, setFormData] = useState({ ...DEFAULT_SETUP_CONFIG })
+  const modeChosen = useRef(false)
   const [ollamaCheck, setOllamaCheck] = useState(null) // null | { loading: boolean, message: string, ready: boolean }
 
+  useEffect(() => {
+    let cancelled = false
+    window.electronAPI?.getMode?.().then(mode => {
+      if (!cancelled && !modeChosen.current && ['Pinned Desktop', 'Hotkey Overlay'].includes(mode)) {
+        setFormData(previous => ({ ...previous, mode }))
+      }
+    }).catch(() => {})
+    return () => { cancelled = true }
+  }, [])
+
   const updateForm = (key, value) => {
+    if (key === 'mode') modeChosen.current = true
     setFormData(prev => ({ ...prev, [key]: value }))
   }
 

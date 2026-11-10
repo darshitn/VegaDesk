@@ -2,6 +2,7 @@ import { contextBridge, ipcRenderer } from 'electron'
 
 contextBridge.exposeInMainWorld('electronAPI', {
   hideWindow: () => ipcRenderer.send('hide-window'),
+  quitDashboard: () => ipcRenderer.send('quit-dashboard'),
   openExternal: (url) => ipcRenderer.send('open-external', url),
   switchMode: (mode) => ipcRenderer.send('switch-mode', mode),
   getMode: () => ipcRenderer.invoke('get-mode'),

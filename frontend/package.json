@@ -1,7 +1,7 @@
 {
   "name": "frontend",
   "private": true,
-  "version": "0.0.0",
+  "version": "0.1.0-beta.1",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -9,9 +9,9 @@
     "lint": "oxlint",
     "test": "node --test",
     "preview": "vite preview",
-    "pack": "electron-builder --dir",
-    "dist": "electron-builder",
-    "build:all": "npm run build && cd ../backend && python -m PyInstaller --name jarvis-backend --onefile run.py --distpath ../dist && cd ../frontend && npm run dist"
+    "pack": "node ../scripts/build_release.js --dir",
+    "dist": "node ../scripts/build_release.js",
+    "build:all": "node ../scripts/build_release.js"
   },
   "dependencies": {
     "@mediapipe/tasks-vision": "^1.0.1",
@@ -43,7 +43,7 @@
   "main": "dist-electron/main.js",
   "build": {
     "appId": "com.jarvis.dashboard",
-    "productName": "Jarvis Dashboard",
+    "productName": "VEGA Desk",
     "directories": {
       "output": "release"
     },

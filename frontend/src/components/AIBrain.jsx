@@ -23,6 +23,7 @@ export default function AIBrain({
   voiceState,
   wakeWordActive,
   voiceNote,
+  compactPanelSelected,
   onSend,
   onToggleMute,
   onStopSpeaking,
@@ -33,18 +34,27 @@ export default function AIBrain({
   const [isListening, setIsListening] = useState(false)
   const [isTranscribing, setIsTranscribing] = useState(false)
 
-  const messagesEndRef = useRef(null)
+  const transcriptRef = useRef(null)
   const mediaRecorderRef = useRef(null)
   const audioChunksRef = useRef([])
   const streamRef = useRef(null)
 
-  const scrollToBottom = () => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
-  }
+  useEffect(() => {
+    const transcript = transcriptRef.current
+    if (transcript.clientHeight > 0) transcript.scrollTop = transcript.scrollHeight
+  }, [messages, isThinking, compactPanelSelected])
 
   useEffect(() => {
-    scrollToBottom()
-  }, [messages, isThinking])
+    const transcript = transcriptRef.current
+    let wasVisible = transcript.clientHeight > 0
+    const observer = new ResizeObserver(() => {
+      const visible = transcript.clientHeight > 0
+      if (visible && !wasVisible) transcript.scrollTop = transcript.scrollHeight
+      wasVisible = visible
+    })
+    observer.observe(transcript)
+    return () => observer.disconnect()
+  }, [])
 
   const stopMicStream = useCallback(() => {
     if (streamRef.current) {
@@ -243,7 +253,7 @@ export default function AIBrain({
       )}
 
       {/* Message History */}
-      <div className="flex-1 overflow-y-auto p-4 space-y-4">
+      <div ref={transcriptRef} className="flex-1 min-h-0 overflow-y-auto p-4 space-y-4">
         {messages.length === 0 && (
           <div className="h-full flex flex-col items-center justify-center opacity-30 text-sm italic text-center">
             <p>System initialized.</p>
@@ -253,7 +263,7 @@ export default function AIBrain({
 
         {messages.map((msg, idx) => (
           <div key={idx} className={`flex flex-col ${msg.role === 'user' ? 'items-end' : 'items-start'}`}>
-            <div className={`max-w-[85%] rounded-lg px-4 py-2 text-sm whitespace-pre-wrap leading-relaxed shadow-sm
+            <div className={`max-w-[85%] rounded-lg px-4 py-2 text-sm whitespace-pre-wrap wrap-anywhere leading-relaxed shadow-sm
               ${msg.role === 'user'
                 ? 'font-medium'
                 : 'bg-black/40 border border-current/10'
@@ -279,7 +289,6 @@ export default function AIBrain({
             </div>
           </div>
         )}
-        <div ref={messagesEndRef} />
       </div>
 
       {/* Input Area */}
@@ -307,7 +316,8 @@ export default function AIBrain({
           }
         </button>
         <textarea
-          className="flex-1 bg-transparent resize-none outline-none text-sm p-2 max-h-32 min-h-[40px] font-inherit"
+          className="flex-1 min-w-0 bg-transparent resize-none outline-none text-sm p-2 max-h-32 min-h-[40px] font-inherit"
+          aria-label="Message VEGA"
           placeholder={micBusy ? (isListening ? "Listening... click mic again to send" : "Transcribing...") : 'Say "Hey Jarvis" or type here...'}
           value={input}
           onChange={(e) => setInput(e.target.value)}

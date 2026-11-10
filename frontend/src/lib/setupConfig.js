@@ -5,7 +5,7 @@ export const DEFAULT_SETUP_CONFIG = {
   userName: 'Sir',
   city: 'London',
   theme: 'sci-fi-hud',
-  mode: 'Hotkey Overlay',
+  mode: 'Pinned Desktop',
   llm: 'none', // Default to offline deterministic-only (₹0, no keys or downloads required)
 }
 

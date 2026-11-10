@@ -1,4 +1,4 @@
-import { app, BrowserWindow, globalShortcut, Tray, Menu, ipcMain, screen, nativeImage, shell, session, Notification } from 'electron'
+import { app, BrowserWindow, globalShortcut, Tray, Menu, ipcMain, screen, nativeImage, shell, session, Notification, dialog } from 'electron'
 import path from 'node:path'
 import fs from 'node:fs'
 import http from 'node:http'
@@ -43,6 +43,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const VITE_DEV_SERVER_URL = process.env['VITE_DEV_SERVER_URL']
 
 let mainWindow
+let startupWindow = null
 let tray
 let backendProcess = null;
 let jarvisAutoLauncher = null;
@@ -65,7 +66,7 @@ function getSettingsPath() {
 }
 
 function loadSettings() {
-  const defaults = { theme: 'sci-fi-hud', mode: 'Hotkey Overlay', windowBounds: null, maximized: false }
+  const defaults = { theme: 'sci-fi-hud', mode: 'Pinned Desktop', windowBounds: null, maximized: false }
   try {
     const parsed = JSON.parse(fs.readFileSync(getSettingsPath(), 'utf-8'))
     const merged = { ...defaults, ...parsed }
@@ -189,6 +190,8 @@ function createMainWindow() {
     mainWindow.show()
     mainWindow.focus()
     mainWindow.webContents.send('toggle-visibility', true)
+    if (startupWindow && !startupWindow.isDestroyed()) startupWindow.destroy()
+    startupWindow = null
   })
 
   mainWindow.on('blur', () => {
@@ -418,6 +421,14 @@ app.whenReady().then(async () => {
       console.log(`[VEGA PACKAGED] Port ${currentPort} already has an active verified backend. Skipping secondary spawn to prevent port collision.`)
     } else {
       const backendPath = path.join(process.resourcesPath, 'backend', 'jarvis-backend.exe');
+      startupWindow = new BrowserWindow({
+        width: 420, height: 180, frame: false, resizable: false,
+        backgroundColor: '#080f1c', title: 'Starting VEGA Desk',
+        webPreferences: { nodeIntegration: false, contextIsolation: true, sandbox: true },
+      })
+      startupWindow.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(
+        '<html><body style="margin:0;padding:32px;background:#080f1c;color:#dff8ff;font:16px system-ui"><h1 style="font-size:24px;letter-spacing:3px">VEGA DESK</h1><p>Starting your local workspace…</p></body></html>'
+      ))
       const backendDbPath = isBeta
         ? path.join(betaRoot, 'db', 'jarvis-beta.db')
         : path.join(app.getPath('userData'), 'jarvis.db')
@@ -429,21 +440,43 @@ app.whenReady().then(async () => {
         VEGA_RUN_ID: runId,
         JARVIS_DB_PATH: backendDbPath,
         VEGA_PROFILE_ROOT: isBeta ? betaRoot : app.getPath('userData'),
-        VEGA_DISABLE_VOICE: isBeta ? '1' : (process.env.VEGA_DISABLE_VOICE || '0'),
+        VEGA_PACKAGED: '1',
+        VEGA_DISABLE_VOICE: process.argv.includes('--voice') ? '0' : '1',
+        VEGA_BETA_VOICE: isBeta && process.argv.includes('--voice') ? '1' : '0',
         VEGA_DISABLE_RADAR: isBeta ? '1' : (process.env.VEGA_DISABLE_RADAR || '0'),
-        LLM_PROVIDER: isBeta ? 'none' : (process.env.LLM_PROVIDER || 'gemini'),
+        LLM_PROVIDER: isBeta ? 'none' : (process.env.LLM_PROVIDER || 'none'),
       }
 
       try {
         if (fs.existsSync(backendPath)) {
           backendProcess = spawn(backendPath, [], { env: backendEnv, stdio: 'inherit' });
-          backendProcess.on('error', (err) => console.error('Backend spawn error:', err))
+          let spawnFailure = null
+          backendProcess.on('error', (err) => {
+            spawnFailure = err
+            console.error('Backend spawn error:', err)
+          })
           backendProcess.on('exit', (code) => console.log('Backend exited with code', code))
+          const deadline = Date.now() + 45000
+          let ready = false
+          while (Date.now() < deadline && backendProcess.exitCode === null && !spawnFailure) {
+            const probe = await probeHealth(currentPort)
+            if (probe.ok && probe.data?.profile === (isBeta ? 'beta' : 'default') &&
+                probe.data?.run_id === runId && probe.data?.database?.status === 'ready') {
+              ready = true
+              break
+            }
+            await new Promise(resolve => setTimeout(resolve, 250))
+          }
+          if (!ready) throw spawnFailure || new Error('The local service did not become ready. Close VEGA and retry. If the problem continues, retain the startup error for diagnosis.')
         } else {
-          console.error('Bundled backend not found at', backendPath)
+          throw new Error('The bundled local service is missing. Reinstall VEGA from the release package.')
         }
       } catch (err) {
+        if (!startupWindow.isDestroyed()) startupWindow.destroy()
         console.error('Failed to spawn backend:', err)
+        dialog.showErrorBox('VEGA could not start', err.message || String(err))
+        app.quit()
+        return
       }
     }
   }
@@ -563,6 +596,11 @@ app.whenReady().then(async () => {
   })
 
   ipcMain.handle('get-mode', () => currentMode)
+  ipcMain.on('quit-dashboard', (event) => {
+    if (event.sender === mainWindow?.webContents && event.senderFrame === event.sender.mainFrame) {
+      app.quit()
+    }
+  })
   
   ipcMain.on('switch-theme', (e, theme) => {
     currentTheme = theme;
@@ -648,7 +686,6 @@ app.whenReady().then(async () => {
     return Notification.isSupported()
   })
 
-  updateWindowsVisibility()
 })
 
 app.on('window-all-closed', () => {

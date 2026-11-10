@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback, useReducer } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { Settings, X, Camera, Maximize2, Minimize2, Bell, LayoutDashboard, Activity } from 'lucide-react'
+import { Settings, X, Camera, Maximize2, Minimize2, Bell, LayoutDashboard, Activity, ListTodo, MessageSquare } from 'lucide-react'
 import AIBrain from './components/AIBrain'
 import SystemMonitor from './components/SystemMonitor'
 import LiveFeeds from './components/LiveFeeds'
@@ -14,6 +14,7 @@ import { createHealthPoller } from './lib/healthPoller'
 import { createNotificationDispatcher, requestNotificationPermission } from './lib/notificationService'
 import { getApiBase, getWsBase, getApiPort, isBetaProfile, isSessionVerified, subscribeSession, verifiedFetch } from './lib/apiConfig'
 import { handleVoiceMessage, sendInterruptAck } from './lib/voiceInterruption'
+import { confirmVoicePreference } from './lib/voiceSettings'
 
 
 const safeGetItem = (key, fallback = '') => {
@@ -45,11 +46,14 @@ export default function App() {
 
   const [cameraEnabled, setCameraEnabled] = useState(() => safeGetItem('jarvisCameraEnabled') === 'true')
   const [wakeWordEnabled, setWakeWordEnabled] = useState(() => safeGetItem('jarvisWakeWordEnabled') !== 'false')
+  const [voiceSettingPending, setVoiceSettingPending] = useState(false)
+  const voiceSettingPendingRef = useRef(false)
   const [micDevices, setMicDevices] = useState([])          // available input devices
   const [selectedMic, setSelectedMic] = useState('')        // currently selected mic name
   const [isExpanded, setIsExpanded] = useState(false)
   const [activeModule, setActiveModule] = useState(null)
   const [activeView, setActiveView] = useState(() => safeGetItem('jarvisActiveView', 'workspace'))
+  const [workspacePanel, setWorkspacePanel] = useState('productivity')
 
   const rotationAccRef = useRef({ x: 0, y: 0 })
   const zoomAccRef = useRef(0)
@@ -315,24 +319,25 @@ export default function App() {
 
   // Toggling wake word off closes the backend mic — classic-Bluetooth headsets
   // then leave Hands-Free Profile and their audio playback quality recovers.
-  const postVoiceEnabled = useCallback((enabled) => {
-    verifiedFetch(`${getApiBase()}/api/voice/enabled`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ enabled })
-    })
-      .then(async (r) => {
-        const data = await r.json()
-        if (data.error) {
-          pushToast({ title: 'Voice Mode', message: data.error, type: 'warning' })
-          setWakeWordEnabled(Boolean(data.enabled))
-          safeSetItem('jarvisWakeWordEnabled', Boolean(data.enabled).toString())
-        } else if (typeof data.enabled === 'boolean') {
-          setWakeWordEnabled(data.enabled)
-          safeSetItem('jarvisWakeWordEnabled', data.enabled.toString())
-        }
-      })
-      .catch(() => { /* backend offline or unverified session */ })
+  const postVoiceEnabled = useCallback(async (enabled) => {
+    if (voiceSettingPendingRef.current) return
+    voiceSettingPendingRef.current = true
+    setVoiceSettingPending(true)
+    try {
+      const confirmed = await confirmVoicePreference((value, signal) => verifiedFetch(`${getApiBase()}/api/voice/enabled`, {
+        method: 'POST',
+        signal,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled: value })
+      }), enabled)
+      setWakeWordEnabled(confirmed)
+      safeSetItem('jarvisWakeWordEnabled', confirmed.toString())
+    } catch (error) {
+      pushToast({ title: 'Voice setting not confirmed', body: error?.message || 'Could not contact the backend. Try again when it is ready.' })
+    } finally {
+      voiceSettingPendingRef.current = false
+      setVoiceSettingPending(false)
+    }
   }, [pushToast])
 
   useEffect(() => {
@@ -340,7 +345,7 @@ export default function App() {
     verifiedFetch(`${getApiBase()}/api/voice/enabled`)
       .then(r => r.json())
       .then(data => {
-        if (data && typeof data.enabled === 'boolean') {
+        if (data && typeof data.enabled === 'boolean' && !voiceSettingPendingRef.current) {
           if (safeGetItem('jarvisWakeWordEnabled') === 'false' && data.enabled) {
             postVoiceEnabled(false)
           } else {
@@ -441,10 +446,7 @@ export default function App() {
   }
 
   const handleToggleWakeWord = () => {
-    const next = !wakeWordEnabled
-    setWakeWordEnabled(next)
-    safeSetItem('jarvisWakeWordEnabled', next.toString())
-    postVoiceEnabled(next)
+    postVoiceEnabled(!wakeWordEnabled)
   }
 
   // Fetch input devices from backend when settings panel opens
@@ -639,7 +641,7 @@ export default function App() {
                       else if (window.electronAPI) setIsVisible(false)
                       else setShowSettings(false)
                     }}
-                    title={showSettings ? "Close Settings" : window.electronAPI ? "Hide Dashboard (Ctrl+Space to restore)" : "Close Settings"}
+                    title={showSettings ? "Close Settings" : window.electronAPI ? `Hide Dashboard (${isBetaProfile() ? 'Ctrl+Alt+Space' : 'Ctrl+Space'} to restore)` : "Close Settings"}
                     aria-label={showSettings ? "Close settings" : "Hide dashboard"}
                   >
                     <X size={18} />
@@ -663,12 +665,23 @@ export default function App() {
                     <div className="p-4 flex flex-col gap-4">
                       <div className="flex items-center justify-between">
                         <h3 className="text-xs font-bold tracking-[0.2em] opacity-60">SETTINGS</h3>
-                        <button
-                          onClick={() => setShowSettings(false)}
-                          className="text-xs px-2 py-1 border border-current/30 hover:bg-white/10 transition-colors flex items-center gap-1"
-                        >
-                          <X size={12} /> Close
-                        </button>
+                        <div className="flex items-center gap-2">
+                          {window.electronAPI?.quitDashboard && (
+                            <button
+                              type="button"
+                              onClick={() => window.electronAPI.quitDashboard()}
+                              className="text-xs px-2 py-1 border border-red-400/40 text-red-300 hover:bg-red-500/15 transition-colors"
+                            >
+                              Quit VEGA
+                            </button>
+                          )}
+                          <button
+                            onClick={() => setShowSettings(false)}
+                            className="text-xs px-2 py-1 border border-current/30 hover:bg-white/10 transition-colors flex items-center gap-1"
+                          >
+                            <X size={12} /> Close
+                          </button>
+                        </div>
                       </div>
                       <div className="flex flex-wrap gap-6 items-center">
 
@@ -719,14 +732,15 @@ export default function App() {
                             Gesture Camera
                           </label>
                           <label className="flex items-center gap-2 text-sm font-semibold cursor-pointer" title="Always-on 'Hey Jarvis' wake word. OFF closes the mic — Bluetooth headsets then keep full music quality (keeping the mic open forces them into Hands-Free mode, which degrades playback).">
-                            <input type="checkbox" checked={wakeWordEnabled} onChange={handleToggleWakeWord} className="accent-[var(--accent)]" />
+                            <input type="checkbox" checked={wakeWordEnabled} disabled={voiceSettingPending || !sessionVerified} onChange={handleToggleWakeWord} className="accent-[var(--accent)]" />
                             Wake Word
+                            <span className="text-xs opacity-75" role="status">{voiceSettingPending ? 'Saving…' : voiceUI.micListening ? 'Listening' : wakeWordEnabled ? 'Enabled · not listening' : 'Off'}</span>
                           </label>
                         </div>
 
                       </div>
 
-                      <div className="flex gap-4">
+                      <div className="flex flex-wrap gap-4">
                         <div className="flex items-center gap-2">
                           <label className="text-sm font-semibold">User Name:</label>
                           <input
@@ -848,14 +862,32 @@ export default function App() {
                   </div>
                 </main>
               ) : (
-                <main className="workspace-layout custom-scrollbar">
-                  <div className="workspace-column custom-scrollbar" role="region" aria-label="Daily productivity and workspaces" tabIndex={0}>
+                <main className="workspace-layout" data-panel={workspacePanel}>
+                  <nav className="workspace-switcher" aria-label="Workspace panels">
+                    <button
+                      type="button"
+                      className={`nav-tab ${workspacePanel === 'productivity' ? 'active' : ''}`}
+                      aria-pressed={workspacePanel === 'productivity'}
+                      aria-controls="workspace-productivity"
+                      onClick={() => setWorkspacePanel('productivity')}
+                    >
+                      <ListTodo size={14} aria-hidden="true" /> Productivity
+                    </button>
+                    <button
+                      type="button"
+                      className={`nav-tab ${workspacePanel === 'assistant' ? 'active' : ''}`}
+                      aria-pressed={workspacePanel === 'assistant'}
+                      aria-controls="workspace-assistant"
+                      onClick={() => setWorkspacePanel('assistant')}
+                    >
+                      <MessageSquare size={14} aria-hidden="true" /> Assistant
+                    </button>
+                  </nav>
+                  <div id="workspace-productivity" className="workspace-column custom-scrollbar" role="region" aria-label="Daily productivity and workspaces" tabIndex={0}>
                     <ProductivityHub />
                   </div>
-                  <div className="workspace-column custom-scrollbar flex flex-col gap-4" role="region" aria-label="AI Assistant and quick capture" tabIndex={0}>
-                    <div className="dashboard-chat flex-1 min-h-[360px]">
-                      <AIBrain {...aiBrainProps} />
-                    </div>
+                  <div id="workspace-assistant" className="workspace-column" role="region" aria-label="AI Assistant and quick capture">
+                    <AIBrain {...aiBrainProps} compactPanelSelected={workspacePanel === 'assistant'} />
                   </div>
                 </main>
               )}

@@ -13,14 +13,26 @@
   }
 
   [data-theme='glass'] {
-    --bg-color: rgba(255, 255, 255, 0.15);
+    --bg-color: rgba(13, 22, 36, 0.94);
     --border-color: rgba(255, 255, 255, 0.3);
-    --text-color: #ffffff;
-    --glow: 0 4px 30px rgba(0, 0, 0, 0.1);
+    --text-color: #f1f5f9;
+    --glow: 0 4px 30px rgba(0, 0, 0, 0.3);
     --font-family: 'Inter', sans-serif;
     --backdrop: blur(16px);
-    --accent: #ffffff;
+    --accent: #a5e3ff;
     --text-shadow: 0 1px 4px rgba(0, 0, 0, 0.8);
+  }
+
+  [data-theme='glass'] input::placeholder,
+  [data-theme='glass'] textarea::placeholder {
+    color: #aebdce;
+    opacity: 1;
+  }
+
+  [data-theme='glass'] .opacity-30,
+  [data-theme='glass'] .opacity-40,
+  [data-theme='glass'] .opacity-45 {
+    opacity: 0.75;
   }
 
   [data-theme='terminal'] {
@@ -146,10 +158,6 @@
     outline-offset: -2px;
   }
 
-  .dashboard-chat {
-    height: clamp(20rem, 48vh, 32rem);
-  }
-
   @media (min-width: 48rem) {
     .dashboard-layout {
       grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -166,23 +174,44 @@
     }
   }
 
-  /* Primary Daily Workspace Layout (Hero view for Today, Focus, Tasks, Assistant) */
+  /* Compact windows give each panel its own space without remounting forms. */
   .workspace-layout {
     flex: 1;
     min-height: 0;
     display: grid;
     grid-template-columns: minmax(0, 1fr);
-    gap: 1.25rem;
-    padding: 1rem 1.25rem;
-    overflow-y: auto;
-    scrollbar-gutter: stable;
+    grid-template-rows: auto minmax(0, 1fr);
+    gap: 0.75rem;
+    padding: 0.75rem 1rem;
+  }
+
+  .workspace-switcher {
+    display: flex;
+    gap: 0.25rem;
+    padding: 0.25rem;
+    border: 1px solid var(--border-color);
+    border-radius: 0.75rem;
+    background: rgb(0 0 0 / 25%);
+  }
+
+  .workspace-switcher > button {
+    flex: 1;
+    justify-content: center;
+    min-height: 2.25rem;
   }
 
   .workspace-column {
     display: flex;
     flex-direction: column;
-    gap: 1.25rem;
     min-width: 0;
+    min-height: 0;
+  }
+
+  #workspace-productivity {
+    overflow-y: auto;
+    padding-inline-end: 0.5rem;
+    padding-bottom: 1rem;
+    scrollbar-gutter: stable;
   }
 
   .workspace-column > * {
@@ -194,20 +223,23 @@
     outline-offset: -2px;
   }
 
+  @media (width < 56rem) {
+    .workspace-layout[data-panel='productivity'] > #workspace-assistant,
+    .workspace-layout[data-panel='assistant'] > #workspace-productivity {
+      display: none;
+    }
+  }
+
   @media (min-width: 56rem) {
     .workspace-layout {
       grid-template-columns: minmax(0, 1.15fr) minmax(0, 0.85fr);
       grid-template-rows: minmax(0, 1fr);
-      overflow: hidden;
+      gap: 1.25rem;
       padding: 1.25rem 1.5rem;
     }
 
-    .workspace-column {
-      min-height: 0;
-      overflow-y: auto;
-      padding-right: 0.5rem;
-      padding-bottom: 1.5rem;
-      scrollbar-gutter: stable;
+    .workspace-switcher {
+      display: none;
     }
   }
 
